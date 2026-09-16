@@ -389,6 +389,9 @@ collect_source() { # source_key path harvest_fn
     local prev=0 prev_dev=0 prev_ino=0 prev_prefix=""
     if [ -f "$STATE_FILE" ]; then
         read -r prev prev_dev prev_ino prev_prefix <<<"$(source_state "$STATE_FILE" "$key")"
+        # first run: source_state prints nothing -> read yields empty strings;
+        # default them to 0/"" so the reset branch never sees empty operands.
+        : "${prev:=0}" "${prev_dev:=0}" "${prev_ino:=0}"
     fi
     local rp
     rp=$(realpath "$path")
