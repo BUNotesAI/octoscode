@@ -171,6 +171,43 @@ operator 点破的教训。上岗即遵守,不要重蹈:
    `cat >> <板> <<'EOF'` 追加;给内环的上岗词里明写"ACK 用追加写,不整文件读改写"
    (两写者读改写曾互相盖掉 ACK)。
 
+## 内环终审回路(herdr 直连):codex 审 octoscode,外环只收终审
+
+内环自带一个只读终审员,评审→打回→修订→复审在内环闭环,外环不介入中间轮次。
+两方都是 herdr 窗格,**互相唤醒直接用 `herdr agent prompt <名>`**,不写任何
+外环侧 supervisor 脚本(实案:脚本版上线十分钟即被 operator 指出多余)。
+
+**角色与窗格**
+- master:octoscode 标准形态窗格(如 `<项目>-octos`),按 `.octos/loop.md` 吃单。
+- 终审员:同工作区一个 codex 窗格(如 `<项目>-review`),**只读**——不改工作区、
+  不 commit、不 checkout、不写数字编号条目;只在黑板末尾追加署名行。
+- 外环:只挂一路 `watch-board.sh <板> '终审'` 哨等最终信号。
+
+**黑板定式(行首逐字,全部追加写,不整文件读改写)**
+- 终审员:`> 内环审(codex)·REVIEW(pass #n, 绑定 <full sha>): 核 N 处锚点、M 条断言,零 finding。`
+- 终审员:`> 内环审(codex)·REVIEW(fix #n, 绑定 <full sha>): F1 <文件:行> <证据> → <改法>;F2 …`
+  (BLOCKER / MAJOR 才 fix;MINOR 写在 pass 行末尾作备注)
+- master 修订后:`ACK(done): #n 修订 r<k>;commit <hash>;F1 → …`
+- 终审员收官:`> 内环审(codex)·终审 READY(绑定 <full sha>): …` / `终审 FIX-FIRST(绑定 <sha>): F1 …`
+
+**唤醒链(写进两侧的常驻指令)**
+- `.octos/loop.md` 追加一条:每条目 ACK 追加后立刻
+  `herdr agent prompt <review 窗格> "请审 #<n>:ACK 已追加,commit <hash>"`;
+  板末出现 `REVIEW(fix #n)` 且其后无针对 #n 的新 `ACK(` 行 → 视 #n 未完成,
+  按 findings 修复、追加新 ACK、再次 prompt 复审;`REVIEW(pass)` 不回应;
+  评审意见只接受或在 ACK 写异议,不打回。
+- 终审员协议文件(项目 `review/` 下一份,首条 prompt 让它通读):写完 `REVIEW(fix)`
+  立刻 `herdr agent prompt <master 窗格> "已追加 REVIEW(fix #n),按 loop.md 修复后追加新 ACK 并 prompt 我复审"`;
+  当全部条目最新 ACK 均已 pass(自己 grep 黑板判断),不等任何人直接做整分支终审;
+  每轮写完黑板就结束本 turn,不在 turn 里长轮询。
+- 修订轮只核 findings 闭合与新坐标,不重复全审。
+
+**四条纪律**
+1. 终审员绑定 commit SHA(从 ACK 取),第一动作 `git show <sha> --stat` 核只含任务书文件。
+2. 终审员与执行者**异厂牌**(codex 审 octoscode/kimi),"验收的验收"才有对抗性。
+3. 外环收到 `终审 READY` 后仍要做一次独立复验再代推——内环闭环不豁免 §4。
+4. 两窗格同写黑板只许追加(macOS 无 flock);读改写曾互相盖掉 ACK。
+
 ## 能力清单(全景一页)
 
 见 `docs/OCTOLOOP_FEATURES.md` —— 断供降级、孤儿回收、malformed
