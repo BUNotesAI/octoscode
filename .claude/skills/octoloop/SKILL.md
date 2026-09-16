@@ -188,10 +188,13 @@ operator 点破的教训。上岗即遵守,不要重蹈:
 
 **角色与窗格**
 - master:octoscode 标准形态窗格(`<master 窗格>`),按 `.octos/loop.md` 吃单。
-- 终审员:同工作区一个 `<review 窗格>`,由 `<审查 agent>` 扮演(上岗三问 ① 定),
+- 终审员:同工作区一个 `<review 窗格>`,由 `<审查 agent>` 扮演(问 ① 定),
   **只读**——不改工作区、不 commit、不 checkout、不写数字编号条目;
   只在黑板末尾追加署名行,署名定式 `内环审(<审查 agent>)`。
 - 外环:只挂一路 `watch-board.sh <板> '终审'` 哨等最终信号。
+- ① 选「不设内环终审」时:本节整体跳过——没有 `<review 窗格>`、没有唤醒链、
+  没有内环终审信号;每条目 ACK 后直接交外环复验(纪律 3 的外环独立复验
+  是唯一验收层)。
 
 **黑板定式(行首逐字,全部追加写,不整文件读改写)**
 - 终审员:`> 内环审(<agent>)·REVIEW(pass #n, 绑定 <full sha>): 核 N 处锚点、M 条断言,零 finding。`
@@ -200,11 +203,15 @@ operator 点破的教训。上岗即遵守,不要重蹈:
 - master 修订后:`ACK(done): #n 修订 r<k>;commit <hash>;F1 → …`
 - 终审员收官:`> 内环审(<agent>)·终审 READY(绑定 <full sha>): …` / `终审 FIX-FIRST(绑定 <sha>): F1 …`
 
-**唤醒链(写进两侧的常驻指令,按 ② 选定的通道)**
-- `.octos/loop.md` 追加一条:每条目 ACK 追加后立刻用 `<唤醒命令>` 唤 `<review 窗格>`:
-  `请审 #<n>:ACK 已追加,commit <hash>`;
+**唤醒链(写进两侧的常驻指令,按 ② 选定的通道、按 ③ 选定的粒度触发)**
+- `.octos/loop.md` 追加一条:**当 ③ 选「每条目 ACK 即审」时**,每条目 ACK 追加后
+  立刻用 `<唤醒命令>` 唤 `<review 窗格>`:`请审 #<n>:ACK 已追加,commit <hash>`;
+  ③ 选「每 goal 收官审」时,不逐条唤——等 goal 收官再唤一次整批审;
+  ③ 选「仅终审」时,条目 ACK 后不唤审,直接等终审员按下面终审前置行动。
+  ② 选「仅黑板拉模型不推送」时,不存在 `<唤醒命令>`:终审员自己按哨/间隔
+  读板发现新 ACK(fix→复审同理,读板驱动),任何一侧都不执行推送命令。
   板末出现 `REVIEW(fix #n)` 且其后无针对 #n 的新 `ACK(` 行 → 视 #n 未完成,
-  按 findings 修复、追加新 ACK、再次唤醒复审;`REVIEW(pass)` 不回应;
+  按 findings 修复、追加新 ACK、按选定通道/读板机制再触发复审;`REVIEW(pass)` 不回应;
   评审意见只接受或在 ACK 写异议,不打回。
   通道示例(按 ② 选择其一):
   - herdr:`herdr agent prompt <review 窗格> "请审 #<n>:ACK 已追加,commit <hash>"`
@@ -212,8 +219,10 @@ operator 点破的教训。上岗即遵守,不要重蹈:
   - steer:`octos steer <octoscode 会话> "请审 #<n>…"`
 - 终审员协议文件(项目 `review/` 下一份,首条 prompt 让它通读):写完 `REVIEW(fix)`
   立刻用选定通道唤醒 `<master 窗格>`:
-  `已追加 REVIEW(fix #n),按 loop.md 修复后追加新 ACK 并唤醒我复审`;
-  当全部条目最新 ACK 均已 pass(自己 grep 黑板判断),不等任何人直接做整分支终审;
+  `已追加 REVIEW(fix #n),按 loop.md 修复后追加新 ACK 并唤醒我复审`
+  (② 为仅黑板模式时不唤醒,等读板);终审前置**按 ③**:逐条粒度要求
+  全部条目最新 ACK 均已 pass;收官/仅终审粒度只要求 goal 已收官、条目均有 ACK,
+  pass 不是前置——满足即不等任何人直接做整分支终审;
   每轮写完黑板就结束本 turn,不在 turn 里长轮询。
 - 修订轮只核 findings 闭合与新坐标,不重复全审。
 
