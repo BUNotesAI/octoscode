@@ -55,7 +55,10 @@ now_rfc3339() { printf '%s' "$HARVEST_TS"; }
 
 hex_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
 
-file_stat() { stat -c '%d %i' "$1" 2>/dev/null || echo "0 0"; }
+# portable stat helpers: GNU coreutils first, BSD/macOS fallback.
+file_size() { stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1"; }
+file_devino() { stat -c '%d %i' "$1" 2>/dev/null || stat -f '%d %i' "$1" || echo "0 0"; }
+file_stat() { file_devino "$1"; }
 
 # prefix sha256 over [max(0,offset-64), offset)
 prefix_sha() { # path offset
@@ -282,7 +285,7 @@ compute_offset() { # path previous_offset -> effective start offset
     local path=$1 prev=${2:-0}
     [ -f "$path" ] || { echo 0; return; }
     local size
-    size=$(stat -c '%s' "$path")
+    size=$(file_size "$path")
     # only complete newline-terminated records count
     local complete=$size
     if [ "$size" -gt 0 ]; then
@@ -391,7 +394,7 @@ collect_source() { # source_key path harvest_fn
     rp=$(realpath "$path")
     local cur_dev cur_ino size
     read -r cur_dev cur_ino <<<"$(file_stat "$path")"
-    size=$(stat -c '%s' "$path" 2>/dev/null || echo 0)
+    size=$(file_size "$path" 2>/dev/null || echo 0)
     if [ "$prev" != 0 ]; then
         if [ "$size" -lt "$prev" ] || [ "$cur_dev" != "$prev_dev" ] || [ "$cur_ino" != "$prev_ino" ]; then
             echo "reset: $path" >&2
@@ -473,17 +476,17 @@ fi
 export OLP_EVO_BOARD="$EVO_BOARD"
 
 # --- commit state (atomic) ----------------------------------------------
-BOARD_SIZE=$(stat -c '%s' "$BOARD")
+BOARD_SIZE=$(file_size "$BOARD")
 EVENTS_SIZE=0
-[ -n "$EVENTS" ] && [ -f "$EVENTS" ] && EVENTS_SIZE=$(stat -c '%s' "$EVENTS")
+[ -n "$EVENTS" ] && [ -f "$EVENTS" ] && EVENTS_SIZE=$(file_size "$EVENTS")
 MCP_SIZE=0
-[ -f "$MCP_BOARD" ] && MCP_SIZE=$(stat -c '%s' "$MCP_BOARD")
+[ -f "$MCP_BOARD" ] && MCP_SIZE=$(file_size "$MCP_BOARD")
 
 # Complete-record boundary: trailing partial line excluded from offset.
 effective_size() { # path
     local path=$1 size last
     [ -f "$path" ] || { echo 0; return; }
-    size=$(stat -c '%s' "$path")
+    size=$(file_size "$path")
     if [ "$size" -gt 0 ]; then
         last=$(dd if="$path" bs=1 skip=$((size - 1)) count=1 2>/dev/null | od -An -tuC | tr -d ' ')
         if [ "$last" != "10" ]; then
