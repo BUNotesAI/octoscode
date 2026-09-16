@@ -140,6 +140,37 @@ operator 点破的教训。上岗即遵守,不要重蹈:
    声明与状态栏矛盾即打回重查——这是"声明-对象一致性"纪律的运行时
    版本:测试对 git 对象,自检对权威状态面。
 
+## Claude Code 外环适配(上岗前置四步,做完才准派单)
+
+本卡的规程假设外环能把哨兵放到后台、能拿到 serve;Claude Code 作外环时这些
+前提要**自己补齐**,补不齐就一句话交给 operator 停下,**禁止换一种"等价"做法**
+(实案 2026-09-16:serve 未起就自换 codex 窗格、前台 `herdr agent wait` 阻塞
+会话 10 分钟一轮、手搓 `^ACK\(` 匹配替代发行版哨兵——三个替代没有一个等价:
+丢了原子 ACK 写入、丢了对话、丢了误报免疫)。
+
+1. **能力预检**:`ToolSearch("select:Monitor,TaskStop")` 加载后台监视与停止
+   工具;没有它们就没有后台哨兵,不得开工。herdr 从会话外驱动时只用显式
+   pane id / agent 名,先 `herdr agent rename <pane> <名>`,永不打 focused pane。
+2. **内环只认 octoscode 标准形态**:`herdr agent list` 里没有 `octoscode` 窗格
+   就把启动命令渲染给 operator——
+   `cd <repo> && octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'`
+   ——然后**停在这一步等**;不得用 codex / claude 窗格顶替(那是 BOOT §6 里
+   operator 明示选择的快轨形态,不是缺 serve 时的兜底)。
+3. **派出同批次挂双哨,全部走 `Monitor`,全部后台**:
+   ```
+   # 正哨:发行版脚本,基线裁剪 + 子串,命中一击退出后重挂
+   Monitor(command: "~/.octos/outer/watch-board.sh <板> 'ACK(' --skip-signature '外环(<署名>)' --interval 10",
+           timeout_ms: 1800000)
+   # 负哨:实例事件流(实例 = ls -t ~/.octos/instances | head -1 对号)
+   Monitor(command: "tail -n 0 -F <实例>/profiles/<档>/data/events.jsonl | grep -E --line-buffered 'goal_transition|escalation|blocked|budget_limited|awaiting_input|peer/(staged|closed)|ERROR'",
+           timeout_ms: 1800000)
+   ```
+   禁止 `herdr agent wait` / `agent prompt --wait` 带长超时、禁止 `sleep` 轮询:
+   前台等待 = 外环失去对话,operator 的消息全部排队。30 分钟到期通知即重挂。
+4. **macOS 无 `flock`**:`olp-board-append.sh` 会在 `flock` 处失败,外环写板改用
+   `cat >> <板> <<'EOF'` 追加;给内环的上岗词里明写"ACK 用追加写,不整文件读改写"
+   (两写者读改写曾互相盖掉 ACK)。
+
 ## 能力清单(全景一页)
 
 见 `docs/OCTOLOOP_FEATURES.md` —— 断供降级、孤儿回收、malformed
