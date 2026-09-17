@@ -107,8 +107,10 @@ operator 点破的教训。上岗即遵守,不要重蹈:
    存在、agent 状态转 idle,**严禁数子串**。
 3. **上岗先做权限预检**:把本轮可预期的高频操作(herdr CLI、octos
    CLI、git push 到 fork)预先配入 harness 允许清单,别撞墙后摆命令
-   等人。两类永远留给 operator 亲手:免沙箱启动、agent 修改自己的
-   权限配置(自我提权,harness 会拦且应该拦)。
+   等人。一类永远留给 operator 亲手:agent 修改自己的权限配置(自我
+   提权,harness 会拦且应该拦)。**免沙箱启动 octoscode 由外环自己做**——
+   operator 已明示授权(2026-09-16「你自己启动octoscode,自己启动herdr」),
+   不再渲染命令等人(实案 2026-09-17:skill 把授权写反,外环白等一轮)。
 4. **窗格纪律**:开窗格用 `split --cwd` 指定工作目录,**勿靠命令串里
    的 cd**(实案:三连启动错实例);窗格复用优先、少开关(churn 会
    让 operator 的附着画面乱跳);一次性任务用 `codex exec` 收工即关,
@@ -126,8 +128,8 @@ operator 点破的教训。上岗即遵守,不要重蹈:
    goal 竞争修复两轮收官;实现先行的 duty 锁八轮会签、两次核心设计
    易稿——fd 继承与公开 seam 都是"实现了才被审出"的方向错误)。
 7. **重启硬清单——兜底瘫痪是隐形的,必须显式巡检**。内环(重)启动
-   后外环逐项核对,禁止"记一笔稍后补":①serve 起(operator 亲手,
-   免沙箱);②**`/loop resume` 外环必代**——先 `/loop list` 取 id 再
+   后外环逐项核对,禁止"记一笔稍后补":①serve 起(外环自起,见
+   「Claude Code 外环适配」§2);②**`/loop resume` 外环必代**——先 `/loop list` 取 id 再
    `/loop resume <id>`(裸 resume 要 id 会拒);③双哨挂载(正 ACK +
    负 goal_transition);④fallbacks 已配且**新会话已快照**(改配置
    不重启=纸面保险)。原则:主机制健康时,兜底层瘫痪完全不可见
@@ -151,11 +153,15 @@ operator 点破的教训。上岗即遵守,不要重蹈:
 1. **能力预检**:`ToolSearch("select:Monitor,TaskStop")` 加载后台监视与停止
    工具;没有它们就没有后台哨兵,不得开工。herdr 从会话外驱动时只用显式
    pane id / agent 名,先 `herdr agent rename <pane> <名>`,永不打 focused pane。
-2. **内环只认 octoscode 标准形态**:`herdr agent list` 里没有 `octoscode` 窗格
-   就把启动命令渲染给 operator——
-   `cd <repo> && octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'`
-   ——然后**停在这一步等**;不得用 codex / claude 窗格顶替(那是 BOOT §6 里
-   operator 明示选择的快轨形态,不是缺 serve 时的兜底)。
+2. **内环只认 octoscode 标准形态,缺了就自己起**:`herdr --session <s> agent list`
+   里没有 `octoscode` 窗格,外环直接在目标 session 的空闲 shell 窗格里启动
+   (operator 已于 2026-09-16 明示授权外环自起 octoscode 与 herdr,不再渲染
+   命令停等):
+   `herdr --session <s> pane run <pane> "cd <repo> && octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'"`
+   ,约 10s 后 `agent list` 见 `octoscode | <pane> | idle` 即 `agent rename <pane> <名>`;
+   没有空闲窗格先 `pane split <pane> --direction right --cwd <repo> --no-focus`。
+   不得用 codex / claude 窗格顶替(那是 BOOT §6 里 operator 明示选择的快轨
+   形态,不是缺 serve 时的兜底)。
 3. **派出同批次挂双哨,全部走 `Monitor`,全部后台**:
    ```
    # 正哨:发行版脚本,基线裁剪 + 子串,命中一击退出后重挂
