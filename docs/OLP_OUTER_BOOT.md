@@ -17,8 +17,9 @@
 
 内环(重)启动后,外环逐项核对,禁止"记一笔稍后补":
 
-1. **serve 起**——operator 亲手执行(免沙箱启动属信任决策,永不由
-   agent 代劳)。
+1. **serve 起**——免沙箱启动属信任决策;本机 operator 已明示授权外环
+   自起(2026-09-16),外环用 `herdr --session <s> pane run <pane> '<标准命令>'`
+   直接起,不渲染命令停等(未获授权的环境仍由 operator 亲手)。
 2. **`/loop resume` 外环必代**——先 `/loop list` 取 id,再
    `/loop resume <id>`(裸 resume 要 id 会拒)。实案注:**兜底瘫痪是
    隐形的**——maintenance 心跳 paused 一整天无人察觉,直至夜间主道
