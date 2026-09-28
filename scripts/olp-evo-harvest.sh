@@ -17,6 +17,7 @@ EVENTS="${OLP_EVO_EVENTS:-}"
 MCP_BOARD="${OLP_EVO_MCP_BOARD:-$HOME/.octos/outer/OUTER_LOOP_MCP.md}"
 EVO_BOARD="${OLP_EVO_BOARD:-$REPO_ROOT/.octos/EVOLUTION.md}"
 STATE_ROOT="${OLP_EVO_STATE:-$HOME/.octos/outer/evo}"
+BOARD_EVENT_TOOL="${OLP_BOARD_EVENT_TOOL:-$(dirname "$0")/olp-board-event.py}"
 
 # 41-r5a ⑤: a missing repo-root must exit 2 with zero side effects —
 # realpath would otherwise die (exit 1) under set -e before the board check.
@@ -153,6 +154,138 @@ harvest_board() { # realpath
             add_candidate "$trigger" review "$rp" "$ident" "$line_no" "$line_off" "$(now_rfc3339)" "$symptom"
         fi
     done < "$BOARD"
+}
+
+# Structured boards use the shared event replayer for exact item ownership.
+# The legacy scanner above remains unchanged and is still used for legacy boards.
+harvest_structured_board() { # realpath state_json candidates_out
+    local rp=$1 state_json=$2 candidates_out=$3
+    OLP_EVO_HARVEST_TS="$HARVEST_TS" python3 -B - "$BOARD" "$rp" "$state_json" "$candidates_out" <<'PY'
+import hashlib, json, os, re, sys
+
+board, realpath, state_path, output_path = sys.argv[1:]
+state = json.load(open(state_path, encoding="utf-8"))
+data = open(board, "rb").read()
+items = {event["id"]: event for event in state.get("events", []) if event.get("type") == "item"}
+HEADING = re.compile(rb"###[ \t\n\r\f\v]+([0-9]+)")
+
+def exact(evidence):
+    raw = data[evidence["offset"]:evidence["offset"] + evidence["length"]]
+    if len(raw) != evidence["length"] or hashlib.sha256(raw).hexdigest() != evidence["sha256"]:
+        raise SystemExit("structured source bytes changed")
+    return raw
+
+def legacy_identity(offset, raw, kind):
+    # The identity harvest_board gives this line (nearest `### <digits>`
+    # heading above it, sha256 of the line without LF), so a hand-written
+    # ACK carded before its recovery keeps the same card afterwards.
+    entry = "-1"
+    for line in data[:offset].split(b"\n"):
+        match = HEADING.match(line)
+        if match:
+            entry = match.group(1).decode("ascii")
+    line_sha = hashlib.sha256(raw[:-1] if raw.endswith(b"\n") else raw).hexdigest()
+    return f"board:{realpath}#{entry}#{kind}#{line_sha}"
+
+rows = []
+for event in state.get("events", []):
+    if event.get("type") != "ack" or event.get("outcome") not in ("blocked", "wontdo"):
+        continue
+    source = event["source"]
+    raw = exact(source)
+    item = items[event["item"]]
+    kind = event["outcome"]
+    trigger = "ack_" + kind
+    line = data[:source["offset"]].count(b"\n") + 1
+    text = raw.decode("utf-8").rstrip("\n")
+    if event.get("recovery") is not None:
+        recovered = event["recovery"]
+        identity = legacy_identity(recovered["offset"], exact(recovered), kind)
+    else:
+        line_sha = hashlib.sha256(text.encode()).hexdigest()
+        # Rows are `|`-delimited; a free-form display number must not split them.
+        number = item["number"].replace("|", "¦")
+        identity = f"board:{realpath}#{number}#{kind}#{line_sha}"
+    symptom = text[:200].replace("|", "¦")
+    rows.append("|".join((trigger, "review", realpath, identity, str(line),
+                          str(source["offset"]), os.environ["OLP_EVO_HARVEST_TS"], symptom)))
+with open(output_path, "w", encoding="utf-8") as output:
+    for row in rows:
+        output.write(row + "\n")
+PY
+}
+
+# Structured boards retain every legacy text trigger except fenced examples,
+# quarantined (voided) lines and ACK lines already represented by a structured
+# ACK event or its replay-validated recovery evidence. The structured pass then
+# adds exact item ownership without double counting.
+harvest_combined_board() { # realpath
+    local rp=$1 work
+    work=$(mktemp -d "${TMPDIR:-/tmp}/olp-evo-board.XXXXXX") || die "cannot create a temporary directory"
+    if ! python3 -B "$BOARD_EVENT_TOOL" state --board "$BOARD" >"$work/state.json"; then
+        rm -rf "$work"
+        die "structured board replay failed: $BOARD"
+    fi
+    if ! python3 -B - "$work/state.json" <<'PY'
+import json, sys
+
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+blocked = any(entry.get("reason") == "unclosed fence after structured opt-in"
+              for entry in state.get("drift", []))
+raise SystemExit(1 if blocked else 0)
+PY
+    then
+        rm -rf "$work"
+        die "structured board blocked: unclosed fence after structured opt-in"
+    fi
+    CANDIDATES=""
+    harvest_board "$rp"
+    printf '%s' "$CANDIDATES" >"$work/legacy"
+    CANDIDATES=""
+    if ! harvest_structured_board "$rp" "$work/state.json" "$work/structured"; then
+        rm -rf "$work"
+        die "structured board harvest failed: $BOARD"
+    fi
+    python3 -B - "$work/state.json" "$work/legacy" "$work/structured" "$work/combined" <<'PY'
+import json, sys
+
+state_path, legacy_path, structured_path, output_path = sys.argv[1:]
+state = json.load(open(state_path, encoding="utf-8"))
+represented_acks = []
+for event in state.get("events", []):
+    if event.get("type") == "ack":
+        source = event["source"]
+        represented_acks.append((source["offset"], source["offset"] + source["length"]))
+for evidence in state.get("recovery_evidence", []):
+    if evidence.get("type") == "ack":
+        source = evidence["source"]
+        represented_acks.append((source["offset"], source["offset"] + source["length"]))
+
+suppressed = [(entry["offset"], entry["offset"] + entry["length"])
+              for entry in state.get("fenced_ranges", [])]
+suppressed += [(entry["source"]["offset"], entry["source"]["offset"] + entry["source"]["length"])
+               for entry in state.get("quarantine_evidence", [])]
+
+def covered(point, intervals):
+    return any(start <= point < end for start, end in intervals)
+
+with open(output_path, "w", encoding="utf-8") as output:
+    for raw in open(legacy_path, encoding="utf-8"):
+        if not raw.strip():
+            continue
+        parts = raw.rstrip("\n").split("|", 7)
+        point = int(parts[5])
+        if covered(point, suppressed):
+            continue
+        if parts[0] in ("ack_blocked", "ack_wontdo") and covered(point, represented_acks):
+            continue
+        output.write(raw)
+    output.write(open(structured_path, encoding="utf-8").read())
+PY
+    while IFS= read -r line; do
+        CANDIDATES+="$line"$'\n'
+    done <"$work/combined"
+    rm -rf "$work"
 }
 
 # Events: python3 json.loads per line; escalation/turn_error fire;
@@ -409,7 +542,23 @@ collect_source() { # source_key path harvest_fn
 # For simplicity and crash-consistency, candidates from lines whose first
 # byte < prev offset are dropped at commit time.
 
-collect_source review "$BOARD" harvest_board
+# Only a board that carries event lines can be structured. A board without any
+# `> OLP-EVENT ` line -- including one with the `.lock` that olp-board-append.sh
+# creates -- never reaches Python or the board lock here. A board that has such
+# lines is replayed under the shared lock, and falls back to the unchanged
+# legacy scanner when no line is a valid event.
+BOARD_LEDGER=legacy
+if [ -f "$BOARD_EVENT_TOOL" ] && [ -f "${BOARD}.lock" ] \
+    && LC_ALL=C grep -q '^> OLP-EVENT ' "$BOARD"; then
+    BOARD_LEDGER=$(python3 -B "$BOARD_EVENT_TOOL" state --board "$BOARD" \
+        | python3 -c 'import json,sys; print("structured" if json.load(sys.stdin)["events"] else "legacy")') \
+        || die "structured board replay failed: $BOARD"
+fi
+case "$BOARD_LEDGER" in
+    structured) collect_source review "$BOARD" harvest_combined_board ;;
+    legacy) collect_source review "$BOARD" harvest_board ;;
+    *) die "unknown board ledger: $BOARD_LEDGER" ;;
+esac
 collect_source events "$EVENTS" harvest_events
 collect_source mcp "$MCP_BOARD" harvest_mcp
 

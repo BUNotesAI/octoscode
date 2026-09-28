@@ -1,0 +1,361 @@
+spec: task
+name: "OLP 结构化追加黑板与可恢复状态投影"
+tags: [olp, protocol, blackboard, observability]
+satisfies: [REQ-OLP-BOARD]
+estimate: 3d
+---
+
+## 意图
+
+为现有文字 OLP 黑板增加 opt-in 的 `olp-board/v1` 结构化扩展。规范文字继续供人和旧工具读取，item、receive、ack、review 及 withdraw、resolve、void 收口事件在同一锁域与文字成对追加；inbox、sentinel 和进化采集从真实回放状态判断待办、漂移和精确条目归属。坏行、半截写入与手写 ACK 变体只会成为带字节证据的阻断 DRIFT，不会让整块板失效。旧板默认保持 legacy，本任务不升 OLP 主版本。
+
+## 已定决策
+
+- 四个相邻标准库 Python CLI 分别负责字节追加、事件回放、待办查询和综合哨；旧 watcher 只增加英文指引；旧追加器只在已 opt-in（含事件行或 `<!-- olp-board/v1 -->` 标记）的板上拒绝 `> OLP-EVENT ` 与独立 `ts=` 正文行，legacy 板行为不变。
+- 事件行固定以 `> OLP-EVENT ` 开头，共用 `schema/id/prev/type/actor/ts/source`；类型为 item、receive、ack、review、withdraw、resolve、void；item/ack 另有必需但可空的 `recovery`，void 带 `target` 字节证据。
+- 回放逐行容错：任一事件行的 JSON、canonical、相邻 source、摘要、ts 边界、recovery/void 目标或生命周期校验失败，都成为 `malformed_event` DRIFT（证据为该行不含 LF 的字节），事件不入账，后续写者从最后有效 head 续链；state 本身不因坏行失败。
+- 行只以 LF 切分；追加守卫、回放、recovery 行边界共用这一规则，裸 CR 是普通内容；规范 item/ACK 行允许以 CRLF 结尾。
+- source 是事件行前紧邻的规范文字字节区间；id、prev、ts、offset 在独占锁内生成，正文、事件、fsync 和回读属于一次追加；写前对候选板回放，新事件必须成为 head 且不得产生新 DRIFT。板以半行结尾时普通写入拒绝，只有以该半行为目标的 void 可先补 LF；半行会打开或位于未闭合围栏时 void 也会被隐藏，此时只能用普通追加器的 `--terminate-partial-line` 显式补一行闭合围栏。
+- 读者以共享锁复制字节后在锁外回放；已配对、已消费区间用有序区间索引查询，回放近似线性。
+- item 只有一次 receive、一次终态 ack、一次 review；return 或 blocked 恢复另开 item，wontdo 不得 return；作者可 withdraw 未 receive 的 item，可 resolve 已 escalate 的 review 并可指向另一个既有后续 item。
+- 状态固定分为 unreceived、received_pending、unreviewed_ack、escalated；withdraw 与 resolve 使条目离开集合；runtime inbox 按 actor 显式返回前两类并保持账本出现顺序，但始终不授权执行；`--since-head` 只把触发事件位于基线之后的 received_pending、unreviewed_ack、escalated 计入 messages，runtime 尚未 receive 的 item 始终计入；基线应取自调用方已处理或有意暂留全部 messages 的那次输出的 head。
+- opt-in 前历史不追溯；opt-in 后未配对规范 item（`unpaired_item`）、符合 v1 语法（前导空白、全角冒号）的 ACK（`unpaired_ack`）与引用/列表/标题/强调/行内/旧式疑似 ACK（`suspected_ack`）标 DRIFT 并阻止自动调度；已配对 source 与已闭合围栏示例不触发。未闭合围栏以 opener 字节证据阻塞，只有同种且不短于 opener 的闭合行恢复写入。末尾无 LF 的半行（无论内容）以 `partial_tail` 暴露，未进围栏的半截事件行同时是 malformed_event。
+- 收口只追加：item/ack 的 recovery 精确消费一条未配对规范行或含 `ACK(outcome)` 的疑似 ACK，语义须匹配；void 精确隔离一条 malformed_event、未配对行、疑似 ACK 或 partial_tail；每段原文至多消费一次，证据分别进入 recovery_evidence 与 quarantine_evidence。actor 是逻辑名，任何 actor 都可写 void，由外环人工核对是约定而非强制。
+- sentinel 的固定输出前缀为 LEDGER-SIGNAL、BOARD-SIGNAL、DRIFT、ERROR、TIMEOUT；普通等待与尾部未完成行超时都输出 TIMEOUT JSON 行并退出 3。
+- harvest 先无锁检查板中是否有 `> OLP-EVENT ` 行，没有就直接走原 legacy 扫描器，不调用 Python、不取板锁；有此类行时在共享锁下回放，回放出有效事件才走结构化路径，否则仍走 legacy 扫描器；取得 ack.item、item.number（`|` 转义）与围栏/隔离区间；带 recovery 的 ACK 沿用被恢复原行的 legacy identity，使恢复前已落的卡不重复；保留 legacy ACK 与签名 override/R2，抑制围栏示例、已隔离行、配对 ACK 及其 recovery 原文的重复卡；临时文件用 mktemp。
+- 板路径若是符号链接则拒绝，避免 Python 工具锁 `<目标>.lock` 而旧 shell 锁 `<链接>.lock`。
+- init 默认保持 legacy；`OLP_BOARD_MODE=structured` 只为新文件生成 receive→执行→ack 模板、带 opt-in 标记且无裸 ACK 占位的新板和独立普通锁，并把锁加入 `.gitignore`；按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具相邻安装且不覆盖，既有项目仅提示迁移，无 Python 时保留旧 shell 能力。
+- 所有场景绑定 `tests/olp_board_protocol.rs` 中直接调用生产 CLI 的 Rust 集成测试，不用单一 Python suite wrapper 代替逐场景证据。
+
+## 边界
+
+### Allowed Changes
+- scripts/olp-board-append.py
+- scripts/olp-board-event.py
+- scripts/olp-board-inbox.py
+- scripts/olp-board-sentinel.py
+- scripts/olp-board-append.sh
+- scripts/olp-watch-board.sh
+- scripts/olp-evo-harvest.sh
+- scripts/olp-init.sh
+- .claude/skills/octoloop/SKILL.md
+- .claude/skills/olp-outer/SKILL.md
+- docs/OUTER_LOOP_PROTOCOL.md
+- docs/OLP_STRUCTURED_BOARD.md
+- docs/OLP_STRUCTURED_BOARD.en.md
+- docs/OLP_OUTER_BOOT.md
+- docs/OLP_QUICKSTART.md
+- docs/OLP_QUICKSTART.en.md
+- docs/OCTOLOOP_AGENTS.md
+- docs/OCTOLOOP_AGENTS.zh-CN.md
+- tests/olp_board*.rs
+- knowledge/requirements/req-olp-board.md
+- specs/task-req-olp-board.spec.md
+
+### Forbidden
+- 不改 `.octos/loop.md`、`.octos/progress.md` 或 `docs/OUTER_LOOP_REVIEW.md` 冻结快照。
+- 不改 Rust 运行时、Cargo 依赖或 CI workflow。
+- 不自动迁移、重写、截断旧板，不自动创建或替换既有板锁。
+- 不把逻辑 runtime actor 描述为 OS 身份认证或 R7 lease。
+- 不在生产 CLI 暴露测试故障注入开关。
+
+## 排除范围
+
+- 自动迁移既有 loop、黑板、锁或仓库自身 tracked `.octos/loop.md`。
+- OLP 主版本升级、R1/R5 最终规范裁定和仓库自身 tracked loop 切换。
+- push、PR、issue 与外部项目部署。
+
+## 完成条件
+
+场景: 四事件全流程投影与回执复验(critical)
+  标签: critical
+  测试: olp_board_lifecycle_projects_actionable_states
+  假设 一块已有普通板和已有独立普通锁
+  当 依次运行 item、runtime inbox、receive、ack、outer inbox、review 与 verify
+  那么 状态依次出现 unreceived、received_pending、unreviewed_ack 并在 accept 后清空
+  并且 旧回执在后续追加后仍可复验
+
+场景: 非法与重复状态转移零落盘(critical)
+  标签: critical
+  测试: olp_board_rejects_invalid_or_repeated_transitions
+  假设 一个已发布或已终态的 item
+  当 错误 actor、重复 receive、重复 ack、错误 review actor 或 wontdo return 被提交
+  那么 命令退出 2 且拒绝动作不推进 head
+
+场景: 通用 record 严格 JSON 且不能绕过正文配对
+  测试: olp_board_record_is_strict_and_cannot_bypass_rendering
+  假设 通用 record 读取事件文件和正文文件
+  当 输入有效 receive、重复 JSON key 或 NaN
+  那么 有效输入沿生产状态机追加,非法输入退出 2 且不追加
+
+场景: 篡改证据、prev 或时间边界被隔离为 DRIFT(critical)
+  标签: critical
+  测试: olp_board_replay_quarantines_tampered_source_chain_and_timestamp
+  假设 一块含有效结构化 item 的临时板副本
+  当 source 字节、prev、source 类型或相邻 ts 行任一被修改后运行 state
+  那么 state 退出 0,该事件以含对应完整性原因的 malformed_event 字节证据进入 DRIFT,账本无事件且调度阻塞
+
+场景: legacy 历史豁免而新未配对 item/ACK 与引用 ACK 标 DRIFT
+  测试: olp_board_mixed_mode_reports_only_post_opt_in_drift
+  假设 opt-in 前旧 ACK、配对 source 内示例、opt-in 后围栏示例、引用标题,以及新的未配对 item、规范 ACK、引用 ACK 与 CRLF 结尾的 item 标题
+  当 查询 state
+  那么 只按 offset 顺序报出 unpaired_item、unpaired_ack、suspected_ack 与 unpaired_item,mode 为 mixed 且 dispatch_blocked 为 true
+
+场景: 手写 ACK 变体阻断调度并只能精确收口(critical)
+  标签: critical
+  测试: olp_board_ack_variants_raise_drift_and_recover_exactly
+  Level: integration
+  Test Double: temporary boards only; production CLIs are not replaced
+  Targets: shared normative and suspected ACK classification in olp-board-event.py
+  假设 opt-in 且已 receive 的 item 之后逐一追加行首、缩进、全角冒号、CRLF、引用、列表、标题、强调、行内、无括号标题与旧式 `ACK:` 形式
+  当 查询 state 并以 ack recovery 或 void 收口
+  那么 前四种为 unpaired_ack、其余为 suspected_ack 且均阻断调度;含 `ACK(done)` 的只接受 done 的 recovery,其余被拒并提示 void,收口后 DRIFT 清空;仅以 ACK 一词开头的普通文字不报 DRIFT
+
+场景: 回放与追加守卫只以 LF 切行
+  测试: olp_board_replay_splits_lines_on_lf_only
+  假设 普通追加器写入含裸 CR 的事件前缀文字和 CR 后的 ACK 文字
+  当 回放并以 ack recovery 引用后者
+  那么 前者不产生 DRIFT 且账本完整,后者是整行 suspected_ack 并可被精确恢复
+
+场景: 未闭合围栏阻塞全部消费者且匹配闭合后恢复(critical)
+  标签: critical
+  测试: olp_board_unclosed_fence_blocks_consumers_and_matching_close_recovers
+  Level: integration
+  Test Double: temporary boards, harvest state, and short sentinel polling only; production parsers and CLIs are not replaced
+  Targets: olp-board-event.py shared fence projection, inbox, sentinel, legacy append, and olp-evo-harvest.sh
+  假设 opt-in 后分别追加四字符反引号或波浪线 opener、规范 ACK、错误种类闭合行与过短闭合行
+  当 state、inbox、sentinel 与 harvest 读取该板,随后追加同种且长度不短于 opener 的闭合行并再次写 item
+  那么 opener 的 offset/length/sha256 可见,mode 为 mixed 且调度阻塞,harvest 非零失败且不推进游标,补闭合后旧字节保留且写入恢复
+
+场景: 保留前缀的残缺记录以 DRIFT 暴露且不可被掩盖(critical)
+  标签: critical
+  测试: olp_board_replay_quarantines_incomplete_reserved_records
+  假设 缺失 ts、半截 ts、坏末条或损坏后又追加文字的保留前缀记录
+  当 运行真实 state CLI 回放
+  那么 全部退出 0 并以 malformed_event 报出坏行字节证据,后续追加不能使其消失
+
+场景: 隔离事件收口注入行与半截写入(critical)
+  标签: critical
+  测试: olp_board_void_quarantines_injected_and_partial_event_lines
+  Level: integration
+  Test Double: raw appends stand in for a guard-bypassing writer and an interrupted write; production CLIs are not replaced
+  Targets: olp-board-event.py replay, void, verify and item paths
+  假设 一块中途被注入事件行的板、一块以半截事件行结尾的板、一块以围栏 opener 半行结尾的板和一块以非事件半行结尾的板
+  当 查询 state、复验旧回执、尝试普通写入,并以 void 精确引用 DRIFT 或 partial_tail
+  那么 旧回执仍验证成功,写入从最后有效 head 续链;半截事件行同时出现在 malformed_event 与 partial_tail;半行存在时普通写入与先 void 其他条目均被拒绝;围栏半行的 void 被拒并提示先闭合围栏,只有带 --terminate-partial-line 的闭合追加成功;收口后 DRIFT 与 partial_tail 清空、原字节不变且写入恢复
+
+场景: 旧 shell 在已 opt-in 板上拒绝事件行
+  测试: olp_board_legacy_shell_refuses_event_lines_on_opted_in_boards
+  假设 一块 legacy 板、一块只带 opt-in 标记的板和一块已有事件的板
+  当 旧 olp-board-append.sh 追加以 `> OLP-EVENT ` 开头的正文、独立 `ts=` 行与普通文字
+  那么 legacy 板照旧写入,另两块板对事件行与 ts 行退出 2 且字节不变,普通文字仍可追加
+
+场景: runtime inbox 按 actor 补读已收未完
+  测试: olp_board_runtime_inbox_filters_and_recovers_received_pending
+  假设 指向 worker 的 item 已 receive 但未 ack
+  当 runtime inbox 以错误 actor 查询或进程重启后以 worker 查询
+  那么 错误 actor 不命中,worker 的 received_pending 重复可见且 execution_authorized 为 false
+
+场景: 作者撤回投错 item 并关闭升级
+  测试: olp_board_withdraw_and_resolve_close_open_queues
+  假设 一个投错收件人的 item、一个已 receive 并 escalate 的 item 和一个已 accept 的 review
+  当 非作者与作者分别执行 withdraw、resolve,并对已 receive、已 resolve、非升级或自指的目标重复操作
+  那么 只有作者的合法操作成功,撤回的 item 不可再 receive 且离开 unreceived,关闭的升级离开 escalated,其余均退出 2;64 位提交摘要被接受
+
+场景: --since-head 只对新增可处理状态报信号
+  测试: olp_board_since_head_signals_only_new_actionable_state
+  Level: integration
+  Test Double: temporary boards, ready files, and short polling intervals only
+  Targets: olp-board-inbox.py and olp-board-sentinel.py --since-head filtering
+  假设 一条已知 escalation、一个已 receive 的 item、记录下来的账本 head,以及一个排队 item 与一个 runtime 在途 item
+  当 inbox 与 sentinel 以 --since-head 等待,随后 runtime 写入新 ACK
+  那么 无基线查询仍命中,带基线的 inbox 等待超时退出 3,未知基线退出 2,sentinel 只以新 ACK 输出 LEDGER-SIGNAL;runtime 以在途 receive 为基线时 messages 只含排队 item
+
+场景: 多个结构化写者同锁生成完整链
+  测试: olp_board_concurrent_writers_share_one_lock_and_chain
+  假设 八个 item CLI 共享一块板及锁
+  当 八个进程并发追加
+  那么 八个命令全部成功且 state 回放八个互不丢失的 item
+
+场景: 旧 shell 与新写者共锁不交错
+  测试: olp_board_old_shell_and_new_writer_do_not_interleave
+  假设 旧追加器写入大正文且新 item CLI 同时启动
+  当 两个生产入口共享同一 `.lock`
+  那么 旧正文保持一个连续区间且结构化事件可回放
+
+场景: 读者共享锁且写者仍互斥
+  测试: olp_board_readers_share_the_lock_and_writers_wait
+  假设 另一进程先后持有板的共享锁与独占锁
+  当 运行 state 与 item 并给出短锁超时
+  那么 共享锁下 state 成功而 item 报 Board lock unavailable,独占锁下 state 报 Board lock unavailable
+
+场景: 符号链接板路径被拒绝
+  测试: olp_board_tools_refuse_symlinked_boards
+  假设 一个指向真实板的符号链接路径
+  当 通过它运行 item、state 与普通追加
+  那么 三者均退出 2 并报 symlink,真实板字节不变
+
+场景: inbox 等待与 sentinel 信号可区分
+  测试: olp_board_inbox_and_sentinel_expose_distinct_outcomes
+  Level: integration
+  Test Double: temporary boards and short polling intervals only; production state machines are not replaced
+  Targets: olp-board-inbox.py and olp-board-sentinel.py production entry points
+  假设 空账本、待收 item 和 sentinel 启动后追加的文字 token
+  当 运行 inbox wait 与 sentinel
+  那么 空账本超时退出 3,待收 item 输出 LEDGER-SIGNAL,新文字输出 BOARD-SIGNAL
+
+场景: sentinel 两条超时路径输出机器行
+  测试: olp_board_sentinel_timeouts_are_machine_readable
+  Level: integration
+  Test Double: temporary boards, ready files, and short polling intervals only; production sentinel is not replaced
+  Targets: olp-board-sentinel.py ordinary deadline and incomplete trailing-line deadline
+  假设 一块空板和一块监视启动后出现尾部未完成行的板
+  当 两个 sentinel 分别到达等待期限
+  那么 两者均输出 TIMEOUT JSON 行并退出 3,尾部路径明确报告 incomplete trailing line
+
+场景: 任意展示编号不改变账本投递顺序
+  测试: olp_board_inbox_preserves_ledger_order_for_arbitrary_numbers
+  Level: integration
+  Test Double: temporary board files only; production event and inbox CLIs are not replaced
+  Targets: olp-board-event.py insertion order and olp-board-inbox.py runtime projection
+  假设 三个 item 的展示编号按 4N、2、A 的顺序写入
+  当 runtime inbox 查询 unreceived
+  那么 返回顺序仍为 4N、2、A 且不按编号排序
+
+场景: sentinel 启动后动态账本事件使用冻结前缀
+  测试: olp_board_sentinel_reports_dynamic_ledger_signals
+  Level: integration
+  Test Double: temporary boards, ready files, and short polling intervals only; production writers and sentinel are not replaced
+  Targets: olp-board-sentinel.py polling loop plus olp-board-event.py item, receive, and ack paths
+  假设 runtime 与 outer sentinel 均先在各自无匹配消息时完成首次查询
+  当 启动后依次写入目标 runtime 的真实 item 和面向 outer 的真实 ACK
+  那么 两次动态命中均输出 LEDGER-SIGNAL 且包含对应事件 ID
+
+场景: 空板等待只创建一次 ready-file
+  测试: olp_board_empty_wait_owns_ready_file_once
+  Level: integration
+  Test Double: temporary boards, ready files, and short polling intervals only
+  Targets: olp-board-inbox.py wait and ready-file creation
+  假设 空板等待分别走超时、新 item 唤醒和 ready-file 已存在三条路径
+  当 运行真实 inbox wait
+  那么 前两条只创建一次 ready-file 且按预期退出,已存在文件被拒绝且不覆盖
+
+场景: sentinel 区分漂移与板替换错误
+  测试: olp_board_sentinel_reports_drift_and_replacement_errors
+  假设 一块含新未配对 ACK 的 mixed 板和另一块正被监视的结构化板
+  当 sentinel 查询 mixed 板或监视中的板 inode 被替换
+  那么 前者输出 DRIFT 并停止自动调度,后者输出 ERROR 且退出 2
+
+场景: 混合采集保留旧触发并精确归属乱序 ACK(critical)
+  标签: critical
+  测试: olp_board_harvest_attributes_out_of_order_acks_to_event_items
+  假设 legacy ACK、签名 R2、围栏示例以及 item 1 与 item 2 按 2 后 1 追加的 ACK 同时存在
+  当 真实 harvest 以 dry-run 读取结构化板
+  那么 恰有四张卡,包含 legacy 与签名触发且结构化 identity 分别含 #2#blocked 与 #1#wontdo
+
+场景: legacy 板采集逐字节不变(critical)
+  标签: critical
+  测试: olp_board_harvest_keeps_legacy_boards_byte_identical
+  Level: integration
+  Test Double: a recording python3 shim, a lock-holder process and temporary boards; the harvest script is not replaced
+  Targets: olp-evo-harvest.sh opt-in precheck and the unchanged legacy scanner
+  假设 一块带旧 shell 锁文件的 legacy 板、被另一进程独占的板锁、会记录调用的 python3 替身,以及随后追加的一行引用事件文字
+  当 以真实事件工具运行 harvest dry-run,并与不提供事件工具的 legacy 扫描器输出对比
+  那么 持锁时 harvest 成功、不调用 python3、不等锁且输出(掩去时间戳)与 legacy 一致;引用事件文字不含有效事件时会被回放,但仍回落到与 legacy 一致的输出
+
+场景: 编号含竖线时采集行保持完整
+  测试: olp_board_harvest_escapes_pipes_in_item_numbers
+  假设 编号为 A|1 与 A|2 的两个 blocked ACK
+  当 以真实 harvest 执行 dry-run
+  那么 恰有两张卡,identity 分别含 #A¦1#blocked# 与 #A¦2#blocked#,每个 envelope 的 line、offset、ts 三个字段均可解析
+
+场景: append 回执不受后续追加影响
+  测试: olp_board_append_receipt_survives_later_appends
+  假设 append CLI 已返回 verified 回执
+  当 旧 shell 再追加正文后按原 offset 与 ts 运行 verify
+  那么 原固定区间仍验证成功
+
+场景: 短写与追加后故障如实报告
+  测试: olp_board_test_process_faults_report_partial_write_truthfully
+  假设 测试进程在生产 append 函数的 write、fsync 或 readback 系统边界注入故障
+  当 发生可恢复短写、部分写后错误、fsync 错误或回读错误
+  那么 短写被 write_all 完成,其余错误均报告 may_have_appended 为 true
+
+场景: event 写入口故障只输出机器错误
+  测试: olp_board_event_cli_reports_write_boundary_failures_as_json
+  Level: integration
+  Test Double: OS and output boundaries replaced inside the test process only
+  Targets: olp-board-event.py main write and receipt paths
+  假设 测试进程在 event CLI 的 write、fsync、readback 或回执输出边界注入故障
+  当 运行真实 event main
+  那么 每条路径退出 2 且 stderr 恰为一个 verified=false、may_have_appended=true 的 JSON,写前拒绝则为 false
+
+场景: 精确恢复 item 与 ACK 漂移并保留审计证据(critical)
+  标签: critical
+  测试: olp_board_recovery_clears_item_and_ack_drift_with_audit_evidence
+  假设 opt-in 后各有一条未配对 item 与 ACK 规范行
+  当 ACK CLI 与通用 record 分别用 recovery 字节证据补录正式事件
+  那么 未解决 drift 清空,旧字节不变且 recovery_evidence 保留两个事件 ID 与证据
+
+场景: 恢复证据不可复用且语义必须匹配
+  测试: olp_board_recovery_rejects_duplicate_and_wrong_semantics_without_writes
+  假设 一条已消费 ACK 和一条 outcome 不同的未配对 ACK
+  当 再次引用前者或用错误 outcome 引用后者
+  那么 两次均退出 2 且 head 与板字节不变
+
+场景: 恢复只接受 opt-in 后未配对的精确区间
+  测试: olp_board_recovery_rejects_pre_opt_in_bad_hash_and_paired_sources
+  假设 opt-in 前文字、坏 hash/区间和已配对 source
+  当 item CLI 尝试用它们作为 recovery
+  那么 全部退出 2 且零写入
+
+场景: 围栏示例与引用标题不可恢复,篡改后被隔离
+  测试: olp_board_recovery_rejects_non_normative_examples
+  Level: integration
+  Test Double: temporary boards only; production item, ack, and state CLIs are not replaced
+  Targets: olp-board-event.py record and replay paths through the shared normative projection
+  假设 opt-in 后围栏中的 item/ACK 示例、引用中的 item 标题以及一条可合法恢复的同语义规范行
+  当 item/ack CLI 直接引用示例,或把合法事件的 recovery 篡改为示例后运行 state
+  那么 直接引用退出 2 且板字节不变,被篡改的事件以 malformed_event 进入 DRIFT 且调度阻塞
+
+场景: 已恢复 blocked/wontdo ACK 只产一张采集卡
+  测试: olp_board_harvest_deduplicates_recovered_acks
+  Level: integration
+  Test Double: temporary boards and absent optional MCP source only; production harvest is not replaced
+  Targets: olp-evo-harvest.sh combined legacy and structured collection
+  假设 blocked 或 wontdo 旧文字 ACK 已由正式事件 recovery 且另有无关 legacy ACK、签名 R2 与围栏示例
+  当 真实 harvest 以 dry-run 读取 structured/mixed 板
+  那么 每个 outcome 恰有三张卡,恢复对只占一张且无关 legacy 与签名触发保留
+
+场景: 恢复前已采集的手写 ACK 恢复后不重复落卡
+  测试: olp_board_harvest_keeps_card_identity_after_recovery
+  Level: integration
+  Test Double: temporary boards, state directory and an absent MCP source only; the harvest script commits for real
+  Targets: olp-evo-harvest.sh structured identity for ACK events that carry recovery evidence
+  假设 opt-in 后一条手写 `ACK(blocked)` 已被一次真实 harvest 落卡
+  当 正式 ACK 以 recovery 补录该行后再次运行真实 harvest
+  那么 进化黑板仍只有一张卡
+
+场景: 生产 CLI 不含故障注入后门
+  测试: olp_board_public_tools_contain_no_production_fault_switches
+  假设 四个公开 Python CLI
+  当 测试检查生产入口
+  那么 不存在公开测试故障环境变量或 fault-inject 开关
+
+场景: structured init 安装后可运行且重复执行不覆盖
+  测试: olp_board_init_installs_structured_mode_idempotently
+  Level: integration
+  Test Double: temporary HOME and git repository only; installed production scripts execute the lifecycle
+  Targets: olp-init.sh and the four installed olp-board Python entry points
+  假设 临时 HOME 与新建 git 项目没有 OLP 文件
+  当 以 `OLP_BOARD_MODE=structured` 运行真实 init,用安装后的四个工具完成 item→receive→ack→review 并再次运行 init
+  那么 模板带 opt-in 标记且无裸 ACK 占位,独立普通锁存在并被 git 忽略,生命周期完成且项目文件、锁与本地工具副本均不被覆盖
+
+场景: 默认 legacy 且无 Python 时旧工具仍可用
+  测试: olp_board_init_preserves_legacy_fallback_without_python
+  Level: integration
+  Test Double: temporary HOME/repositories and a curated executable PATH without Python
+  Targets: olp-init.sh legacy template and shell-tool installation paths
+  假设 一个默认环境和一个 PATH 不含 Python 的临时项目
+  当 分别运行真实 init
+  那么 默认 loop 保留旧 ACK 契约,无 Python 运行明确报告结构化能力不可用且仍安装旧 watcher 与 append shell
