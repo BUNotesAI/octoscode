@@ -603,6 +603,17 @@ def parse_event_record(state, index, offset, line):
     source = event["source"]
     require(source["offset"] + source["length"] == offset,
             "Event source must be immediately adjacent")
+    start = source["offset"]
+    # A source is whole lines of fresh text. Only a void that closes a partial
+    # line starts with the LF it supplies to that line.
+    require(start == 0 or state.data[start - 1:start] == b"\n" or
+            (event.get("type") == "void" and state.data[start:start + 1] == b"\n"),
+            "Event source must start at a line boundary")
+    # Paired and consumed ranges stay disjoint, so no byte is paired twice or
+    # both paired and voided, and the sorted-range queries stay exact.
+    require(not state.paired.overlaps(start, source["length"]) and
+            not state.claimed.overlaps(start, source["length"]),
+            "Event source overlaps text already paired or consumed")
     body = state.data[source["offset"]:offset]
     require(len(body) == source["length"] and digest(body) == source["sha256"],
             "Event source bytes changed")
@@ -807,6 +818,12 @@ def main(argv=None):
     state.add_argument("--board", required=True)
     state.add_argument("--lock-timeout", type=finite_nonnegative, default=10.0)
 
+    snapshot = sub.add_parser(
+        "snapshot", help="copy the board once under its shared lock and project that copy")
+    snapshot.add_argument("--board", required=True)
+    snapshot.add_argument("--out", required=True, help="new file that receives the board bytes")
+    snapshot.add_argument("--lock-timeout", type=finite_nonnegative, default=10.0)
+
     verify = sub.add_parser("verify")
     verify.add_argument("--receipt-file", required=True)
     verify.add_argument("--lock-timeout", type=finite_nonnegative, default=10.0)
@@ -862,6 +879,16 @@ def main(argv=None):
             result = record_command(args, progress)
         elif args.command == "verify":
             result = verify_receipt(args)
+        elif args.command == "snapshot":
+            # One read serves every consumer of this state (the harvest reads the
+            # copy, not the live board), so text appended meanwhile waits whole
+            # for the next reader.
+            _, data = board_module().read_snapshot(args.board, args.lock_timeout)
+            with open(args.out, "xb") as stream:
+                stream.write(data)
+            result = {**replay(data).projection(),
+                      "snapshot": {"path": str(Path(args.out).resolve()), "length": len(data),
+                                   "sha256": digest(data)}}
         else:
             _, ledger = read_state(args.board, args.lock_timeout)
             result = ledger.projection()

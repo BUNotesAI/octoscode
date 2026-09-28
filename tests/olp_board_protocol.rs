@@ -189,6 +189,23 @@ fn source_ref(offset: usize, bytes: &[u8]) -> Value {
     json!({"offset": offset, "length": bytes.len(), "sha256": sha256_hex(bytes)})
 }
 
+/// PATH with no-op `octoscode` and `octos` stubs in front, so the dependency
+/// check in `olp-init.sh` never depends on whether the machine running the
+/// tests has them installed (CI does not install them).
+fn path_with_octoscode_stubs(root: &Path) -> std::ffi::OsString {
+    let bin = root.join("octoscode-stubs");
+    fs::create_dir_all(&bin).unwrap();
+    for name in ["octoscode", "octos"] {
+        let path = bin.join(name);
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+    }
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited))).unwrap()
+}
+
 fn tree_contains_file_named(root: &PathBuf, name: &str) -> bool {
     if !root.exists() {
         return false;
@@ -1947,11 +1964,13 @@ fn olp_board_init_installs_structured_mode_idempotently() {
             .success()
     );
 
+    let stub_path = path_with_octoscode_stubs(&sb.root);
     let run_init = || {
         Command::new("bash")
             .arg(script("olp-init.sh"))
             .current_dir(&project)
             .env("HOME", &home)
+            .env("PATH", &stub_path)
             .env("OLP_BOARD_MODE", "structured")
             .env("OLP_INIT_LANG", "en")
             .output()
@@ -2180,6 +2199,7 @@ fn olp_board_init_preserves_legacy_fallback_without_python() {
         .arg(script("olp-init.sh"))
         .current_dir(&project)
         .env("HOME", &home)
+        .env("PATH", path_with_octoscode_stubs(&sb.root))
         .env_remove("OLP_BOARD_MODE")
         .output()
         .unwrap();
@@ -2584,6 +2604,33 @@ fn olp_board_legacy_shell_refuses_event_lines_on_opted_in_boards() {
             assert_eq!(fs::read(&sb.board).unwrap(), before);
         }
         assert!(sb.shell_append(b"Plain note.\n").status.success());
+        // Both helpers judge a standalone ts= line alike: an optional CR before
+        // LF is still a timestamp line, a trailing space is not.
+        for (body, refused) in [
+            (b"ts=2026-09-27T00:00:00Z\r\n".as_slice(), true),
+            (b"ts=2026-09-27T00:00:00Z \n".as_slice(), false),
+            (b"```text\nts=2026-09-27T00:00:00Z\n```\n".as_slice(), true),
+        ] {
+            let shell = sb.shell_append(body);
+            let python = Command::new("python3")
+                .arg("-B")
+                .arg(script("olp-board-append.py"))
+                .args(["append", "--board"])
+                .arg(&sb.board)
+                .arg("--body-file")
+                .arg(sb.file("ts-body.txt", body))
+                .output()
+                .unwrap();
+            for (tool, output) in [("shell", &shell), ("python", &python)] {
+                assert_eq!(
+                    output.status.success(),
+                    !refused,
+                    "{tool} {:?} stderr={}",
+                    String::from_utf8_lossy(body),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
     }
 }
 
@@ -2891,7 +2938,11 @@ fn olp_board_harvest_keeps_legacy_boards_byte_identical() {
             .status
             .success()
     );
-    let reference = sb.harvest(&missing_tool, None);
+    // A board with an event line no longer degrades silently without the event
+    // tool (REQ-OLP-BOARD-HARVEST), so that run cannot serve as the reference.
+    // The quoted line triggers nothing, so the reference taken before it holds.
+    let degraded = sb.harvest(&missing_tool, None);
+    assert!(!degraded.status.success());
     let actual = sb.harvest(&script("olp-board-event.py"), None);
     assert!(
         actual.status.success(),
@@ -2900,7 +2951,7 @@ fn olp_board_harvest_keeps_legacy_boards_byte_identical() {
     );
     assert_eq!(
         mask_timestamps(&String::from_utf8_lossy(&actual.stdout)),
-        mask_timestamps(&String::from_utf8_lossy(&reference.stdout))
+        expected
     );
 }
 
@@ -3086,6 +3137,25 @@ fn olp_board_tools_refuse_symlinked_boards() {
         ),
         "symlink",
     );
+    let mut child = Command::new("bash")
+        .arg(script("olp-board-append.sh"))
+        .arg(&link)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Through a link.\n")
+        .unwrap();
+    failed(child.wait_with_output().unwrap(), "symlink");
+    assert!(
+        !sb.root.join("LINK.md.lock").exists(),
+        "the shell must not lock beside the link"
+    );
     assert_eq!(fs::read(&sb.board).unwrap(), before);
 }
 
@@ -3162,4 +3232,204 @@ fn olp_board_harvest_keeps_card_identity_after_recovery() {
     );
     let cards = fs::read_to_string(&evolution).unwrap();
     assert_eq!(cards.matches("### EVO-").count(), 1, "{cards}");
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: event state and void CLIs.
+/// - Production path: replay checks where an event source starts and whether it overlaps paired or consumed text.
+/// - External edges faked: raw appends stand in for a writer that bypasses every guard.
+/// - What this proves: a source may neither swallow a paired record nor start mid-line, so no byte range is paired twice or paired and voided at once.
+/// - What this intentionally does not exercise: the writers, which only ever append fresh sources.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_replay_quarantines_misaligned_and_overlapping_sources
+#[test]
+fn olp_board_replay_quarantines_misaligned_and_overlapping_sources() {
+    let sb = Sandbox::new("source-ranges");
+    sb.raw_append(b"### B. decoy\n");
+    sb.item("A", "Real", "outer", "runtime");
+    let quoted_at = sb.len();
+    sb.raw_append(b"> ACK(done): quoted, not a real ACK\n");
+    let state = sb.state();
+    let real = state["events"][0].clone();
+    let head = state["head"].clone();
+
+    // An item whose source starts at the top of the board swallows the paired record.
+    let bytes = fs::read(&sb.board).unwrap();
+    let mut swallowing = real.clone();
+    swallowing["id"] = json!("b".repeat(32));
+    swallowing["prev"] = head.clone();
+    swallowing["number"] = json!("B");
+    swallowing["title"] = json!("decoy");
+    swallowing["source"] = source_ref(0, &bytes);
+    let ts = real["ts"].as_str().unwrap();
+    sb.raw_append(
+        format!(
+            "> OLP-EVENT {}\nts={ts}\n",
+            serde_json::to_string(&swallowing).unwrap()
+        )
+        .as_bytes(),
+    );
+
+    // An item whose source starts in the middle of a prose line.
+    let prose_at = sb.len();
+    let prose = b"note ### C. mid-line\nBody.\n";
+    sb.raw_append(prose);
+    let mut misaligned = real.clone();
+    misaligned["id"] = json!("c".repeat(32));
+    misaligned["prev"] = head.clone();
+    misaligned["number"] = json!("C");
+    misaligned["title"] = json!("mid-line");
+    misaligned["source"] = source_ref(prose_at + 5, &prose[5..]);
+    sb.raw_append(
+        format!(
+            "> OLP-EVENT {}\nts={ts}\n",
+            serde_json::to_string(&misaligned).unwrap()
+        )
+        .as_bytes(),
+    );
+
+    let state = sb.state();
+    assert_eq!(state["events"].as_array().unwrap().len(), 1, "{state}");
+    assert_eq!(state["head"], head);
+    let reasons: Vec<String> = state["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "malformed_event")
+        .map(|entry| entry["reason"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(reasons.len(), 2, "{state}");
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("overlaps text already paired or consumed")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("must start at a line boundary")),
+        "{reasons:?}"
+    );
+
+    // The quoted ACK inside the rejected source is not paired: it is voided exactly once.
+    let quoted = state["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["offset"] == json!(quoted_at))
+        .unwrap_or_else(|| panic!("quoted ACK is not drift in {state}"))
+        .clone();
+    success_json(sb.void(&quoted));
+    failed(sb.void(&quoted), "already consumed");
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: olp-evo-harvest.sh --dry-run.
+/// - Production path: the opt-in gate in front of the structured and legacy board scanners.
+/// - External edges faked: a missing event tool path and a renamed board lock.
+/// - What this proves: a board with event lines is never scanned by the legacy scanner just because a tool or the lock is missing, since that changes each ACK's identity and cards it twice.
+/// - What this intentionally does not exercise: boards without event lines, which stay on the legacy scanner.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_harvest_refuses_to_degrade_structured_boards
+#[test]
+fn olp_board_harvest_refuses_to_degrade_structured_boards() {
+    let sb = Sandbox::new("harvest-no-degrade");
+    let item = sb.item("R8-1", "Blocked work", "outer", "runtime");
+    let item_id = item["event"].as_str().unwrap();
+    success_json(sb.receive("runtime", item_id));
+    success_json(sb.ack("runtime", item_id, "blocked"));
+
+    let missing_tool = sb.root.join("no-event-tool.py");
+    let without_tool = sb.harvest(&missing_tool, None);
+    assert!(!without_tool.status.success());
+    assert!(String::from_utf8_lossy(&without_tool.stderr).contains("event tool"));
+    assert!(!String::from_utf8_lossy(&without_tool.stdout).contains("### EVO-"));
+
+    let lock = sb.root.join("BOARD.md.lock");
+    let parked = sb.root.join("BOARD.md.lock.parked");
+    fs::rename(&lock, &parked).unwrap();
+    let without_lock = sb.harvest(&script("olp-board-event.py"), None);
+    fs::rename(&parked, &lock).unwrap();
+    assert!(!without_lock.status.success());
+    assert!(String::from_utf8_lossy(&without_lock.stderr).contains(".lock"));
+    assert!(!String::from_utf8_lossy(&without_lock.stdout).contains("### EVO-"));
+
+    let complete = sb.harvest(&script("olp-board-event.py"), None);
+    assert!(
+        complete.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&complete.stderr)
+    );
+    let text = String::from_utf8_lossy(&complete.stdout);
+    assert_eq!(text.matches("### EVO-").count(), 1, "{text}");
+    assert!(text.contains("#R8-1#blocked#"), "{text}");
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: olp-evo-harvest.sh --dry-run, twice.
+/// - Production path: the structured path reads one snapshot for replay, the legacy scan and the structured scan.
+/// - External edges faked: an event-tool wrapper that forwards every call to the real tool and, once, appends a real ACK right after its second call returns.
+/// - What this proves: an ACK appended while a run is in progress is left for the next run, which cards it once under its structured identity; it is never carded under a legacy identity first.
+/// - What this intentionally does not exercise: the gate's own replay, which only picks the path.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_harvest_reads_one_snapshot_per_run
+#[test]
+fn olp_board_harvest_reads_one_snapshot_per_run() {
+    let sb = Sandbox::new("harvest-snapshot");
+    let item = sb.item("R8-1", "Blocked work", "outer", "runtime");
+    let item_id = item["event"].as_str().unwrap().to_owned();
+    success_json(sb.receive("runtime", &item_id));
+    let body = sb.file("late-ack.txt", b"dependency unavailable");
+    let pending = sb.file("inject-ack", item_id.as_bytes());
+    let calls = sb.root.join("wrapper-calls");
+    let wrapper = sb.file(
+        "event-tool-wrapper.py",
+        format!(
+            r#"import os, subprocess, sys
+real, board, body, pending, calls = {real:?}, {board:?}, {body:?}, {pending:?}, {calls:?}
+result = subprocess.run([sys.executable, "-B", real, *sys.argv[1:]])
+count = int(open(calls).read()) + 1 if os.path.exists(calls) else 1
+open(calls, "w").write(str(count))
+if count == 2 and os.path.exists(pending):
+    item = open(pending).read().strip()
+    os.remove(pending)
+    subprocess.run([sys.executable, "-B", real, "ack", "--board", board, "--actor", "runtime",
+                    "--item", item, "--outcome", "blocked", "--r2", "verified",
+                    "--commit", "0123456789abcdef0123456789abcdef01234567", "--body-file", body],
+                   check=True, capture_output=True)
+sys.exit(result.returncode)
+"#,
+            real = script("olp-board-event.py").to_str().unwrap(),
+            board = sb.board.to_str().unwrap(),
+            body = body.to_str().unwrap(),
+            pending = pending.to_str().unwrap(),
+            calls = calls.to_str().unwrap(),
+        )
+        .as_bytes(),
+    );
+
+    let identities = |output: &Output| -> Vec<String> {
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix("identity: ").map(str::to_owned))
+            .collect()
+    };
+    let first = identities(&sb.harvest(&wrapper, None));
+    assert!(
+        !pending.exists(),
+        "the wrapper did not append the ACK during the first run"
+    );
+    let second = identities(&sb.harvest(&wrapper, None));
+    assert!(
+        first.is_empty(),
+        "an ACK appended mid-run was carded in the same run: {first:?}"
+    );
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert!(second[0].contains("#R8-1#blocked#"), "{second:?}");
 }

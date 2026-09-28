@@ -140,7 +140,8 @@ def _validate_body(body, max_bytes=None, allow_protocol=False):
     if not body.endswith(b"\n"):
         raise ValueError("Body must end with LF; bytes are never normalized")
     if re.search(rb"(?m)^ts=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\r?$", body):
-        raise ValueError("The tool owns standalone UTC timestamp lines")
+        raise ValueError("The tool owns standalone UTC timestamp lines, fenced examples "
+                         "included; indent or reword the example line")
 
 
 def _receipt(board, offset, body, payload, ts):

@@ -20,13 +20,22 @@ LOCK="${BOARD}.lock"
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 cat > "$TMP"
+OPTED_IN='^(> OLP-EVENT |<!-- olp-board/v1 -->$)'
+# The Python tools lock the real board; through a symlink this helper would lock
+# <link>.lock instead and split the lock domain, so refuse before locking.
+if [ -L "$BOARD" ] && LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
+    echo "error: $BOARD is a symlink to an olp-board/v1 board; use the real path so every tool shares one lock" >&2
+    exit 2
+fi
 exec 9>"$LOCK"
 flock -x 9
 # A board that opted in to olp-board/v1 reserves `> OLP-EVENT ` lines and
 # standalone `ts=` lines for the event CLI; a hand-appended copy would only be
-# quarantined as malformed DRIFT, or could re-pair a damaged event.
-if LC_ALL=C grep -qE '^(> OLP-EVENT |ts=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z[[:space:]]?$)' "$TMP" \
-    && LC_ALL=C grep -qE '^(> OLP-EVENT |<!-- olp-board/v1 -->$)' "$BOARD" 2>/dev/null; then
+# quarantined as malformed DRIFT, or could re-pair a damaged event. A ts= line
+# ends with an optional CR only, exactly as olp-board-append.py judges it.
+TS_LINE='ts=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'$'\r''?$'
+if LC_ALL=C grep -qE "^(> OLP-EVENT |${TS_LINE})" "$TMP" \
+    && LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
     echo "error: $BOARD opted in to olp-board/v1; record events with olp-board-event.py" >&2
     exit 2
 fi

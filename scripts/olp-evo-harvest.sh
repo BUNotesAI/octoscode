@@ -220,11 +220,14 @@ PY
 # ACK event or its replay-validated recovery evidence. The structured pass then
 # adds exact item ownership without double counting.
 harvest_combined_board() { # realpath
-    local rp=$1 work
+    local rp=$1 work live=$BOARD
     work=$(mktemp -d "${TMPDIR:-/tmp}/olp-evo-board.XXXXXX") || die "cannot create a temporary directory"
-    if ! python3 -B "$BOARD_EVENT_TOOL" state --board "$BOARD" >"$work/state.json"; then
+    # One read of the board under its shared lock feeds the replay, the legacy
+    # scan and the structured scan; text appended meanwhile is left whole for
+    # the next run instead of being carded under a legacy identity.
+    if ! python3 -B "$BOARD_EVENT_TOOL" snapshot --board "$live" --out "$work/board" >"$work/state.json"; then
         rm -rf "$work"
-        die "structured board replay failed: $BOARD"
+        die "structured board replay failed: $live"
     fi
     if ! python3 -B - "$work/state.json" <<'PY'
 import json, sys
@@ -239,13 +242,16 @@ PY
         die "structured board blocked: unclosed fence after structured opt-in"
     fi
     CANDIDATES=""
+    BOARD="$work/board"
     harvest_board "$rp"
     printf '%s' "$CANDIDATES" >"$work/legacy"
     CANDIDATES=""
     if ! harvest_structured_board "$rp" "$work/state.json" "$work/structured"; then
+        BOARD=$live
         rm -rf "$work"
-        die "structured board harvest failed: $BOARD"
+        die "structured board harvest failed: $live"
     fi
+    BOARD=$live
     python3 -B - "$work/state.json" "$work/legacy" "$work/structured" "$work/combined" <<'PY'
 import json, sys
 
@@ -548,8 +554,14 @@ collect_source() { # source_key path harvest_fn
 # lines is replayed under the shared lock, and falls back to the unchanged
 # legacy scanner when no line is a valid event.
 BOARD_LEDGER=legacy
-if [ -f "$BOARD_EVENT_TOOL" ] && [ -f "${BOARD}.lock" ] \
-    && LC_ALL=C grep -q '^> OLP-EVENT ' "$BOARD"; then
+if LC_ALL=C grep -q '^> OLP-EVENT ' "$BOARD" 2>/dev/null; then
+    # Never fall back to the legacy scanner just because a tool or the lock is
+    # missing: it gives the same ACK another identity, so it would be carded
+    # again once the structured path works.
+    [ -f "$BOARD_EVENT_TOOL" ] \
+        || die "board has olp-board/v1 event lines but the event tool is missing: $BOARD_EVENT_TOOL"
+    [ -f "${BOARD}.lock" ] \
+        || die "board has olp-board/v1 event lines but its lock is missing: ${BOARD}.lock (structured harvest needs it)"
     BOARD_LEDGER=$(python3 -B "$BOARD_EVENT_TOOL" state --board "$BOARD" \
         | python3 -c 'import json,sys; print("structured" if json.load(sys.stdin)["events"] else "legacy")') \
         || die "structured board replay failed: $BOARD"
