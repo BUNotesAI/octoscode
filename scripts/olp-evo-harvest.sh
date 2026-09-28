@@ -45,6 +45,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 die() { echo "error: $*" >&2; exit 1; }
+# The structured path's temporary directory, removed on every exit path.
+COMBINED_WORK=""
+cleanup_combined_work() { [ -z "$COMBINED_WORK" ] || rm -rf "$COMBINED_WORK"; }
+trap cleanup_combined_work EXIT
 skip() { echo "skip: $*" >&2; }
 
 # --- helpers -----------------------------------------------------------
@@ -222,6 +226,7 @@ PY
 harvest_combined_board() { # realpath
     local rp=$1 work live=$BOARD
     work=$(mktemp -d "${TMPDIR:-/tmp}/olp-evo-board.XXXXXX") || die "cannot create a temporary directory"
+    COMBINED_WORK=$work
     # One read of the board under its shared lock feeds the replay, the legacy
     # scan and the structured scan; text appended meanwhile is left whole for
     # the next run instead of being carded under a legacy identity.
@@ -252,7 +257,7 @@ PY
         die "structured board harvest failed: $live"
     fi
     BOARD=$live
-    python3 -B - "$work/state.json" "$work/legacy" "$work/structured" "$work/combined" <<'PY'
+    if ! python3 -B - "$work/state.json" "$work/legacy" "$work/structured" "$work/combined" <<'PY'
 import json, sys
 
 state_path, legacy_path, structured_path, output_path = sys.argv[1:]
@@ -275,23 +280,30 @@ suppressed += [(entry["source"]["offset"], entry["source"]["offset"] + entry["so
 def covered(point, intervals):
     return any(start <= point < end for start, end in intervals)
 
-with open(output_path, "w", encoding="utf-8") as output:
-    for raw in open(legacy_path, encoding="utf-8"):
+# Rows stay bytes: the legacy shell appender never validates UTF-8, so a
+# legacy trigger line may carry other bytes and must still be carded as is.
+with open(output_path, "wb") as output:
+    for raw in open(legacy_path, "rb"):
         if not raw.strip():
             continue
-        parts = raw.rstrip("\n").split("|", 7)
+        parts = raw.rstrip(b"\n").split(b"|", 7)
         point = int(parts[5])
         if covered(point, suppressed):
             continue
-        if parts[0] in ("ack_blocked", "ack_wontdo") and covered(point, represented_acks):
+        if parts[0] in (b"ack_blocked", b"ack_wontdo") and covered(point, represented_acks):
             continue
         output.write(raw)
-    output.write(open(structured_path, encoding="utf-8").read())
+    output.write(open(structured_path, "rb").read())
 PY
+    then
+        rm -rf "$work"
+        die "structured board merge failed: $live"
+    fi
     while IFS= read -r line; do
         CANDIDATES+="$line"$'\n'
     done <"$work/combined"
     rm -rf "$work"
+    COMBINED_WORK=""
 }
 
 # Events: python3 json.loads per line; escalation/turn_error fire;

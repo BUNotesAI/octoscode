@@ -118,7 +118,9 @@ def main(argv=None):
                 print(json.dumps({"status": "timeout", **result}, ensure_ascii=False), file=sys.stderr)
                 return 3
             time.sleep(min(args.interval, remaining))
-    except (OSError, ValueError, KeyError, TypeError, OverflowError, KeyboardInterrupt) as error:
+    # RecursionError: deeply nested JSON input is an input error like any other.
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError,
+            KeyboardInterrupt) as error:
         print(json.dumps({"status": "error", "matched": False, "error": str(error)},
                          ensure_ascii=False), file=sys.stderr)
         return 2

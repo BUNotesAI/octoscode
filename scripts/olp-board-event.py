@@ -894,7 +894,9 @@ def main(argv=None):
             result = ledger.projection()
         print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)
         return 0
-    except (OSError, ValueError, KeyError, TypeError, OverflowError, KeyboardInterrupt) as error:
+    # RecursionError: deeply nested JSON input is an input error like any other.
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError,
+            KeyboardInterrupt) as error:
         print(json.dumps({"verified": False, "error": str(error),
                           "may_have_appended": progress["may_have_appended"],
                           "execution_authorized": False}, ensure_ascii=False),

@@ -121,7 +121,9 @@ def main(argv=None):
                 emit("TIMEOUT", {"status": "timeout", **result})
                 return 3
             time.sleep(min(args.interval, remaining))
-    except (OSError, ValueError, KeyError, TypeError, OverflowError, KeyboardInterrupt) as error:
+    # RecursionError: deeply nested JSON input is an input error like any other.
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError,
+            KeyboardInterrupt) as error:
         emit("ERROR", {"error": str(error)})
         return 2
 

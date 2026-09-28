@@ -3433,3 +3433,181 @@ sys.exit(result.returncode)
     assert_eq!(second.len(), 1, "{second:?}");
     assert!(second[0].contains("#R8-1#blocked#"), "{second:?}");
 }
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: olp-evo-harvest.sh --dry-run.
+/// - Production path: the structured path's candidate merge and its temporary directory.
+/// - External edges faked: a temporary TMPDIR, and an event-tool wrapper that returns a corrupt snapshot state in the second run.
+/// - What this proves: a legacy trigger line with bytes that are not UTF-8 (the legacy shell appender never validates) still cards on an opted-in board, and a failing run reports an error line and leaves no temporary directory.
+/// - What this intentionally does not exercise: boards without event lines, which never reach the merge.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_harvest_keeps_non_utf8_triggers_and_cleans_up
+#[test]
+fn olp_board_harvest_keeps_non_utf8_triggers_and_cleans_up() {
+    let sb = Sandbox::new("harvest-non-utf8");
+    let item = sb.item("R8-1", "Blocked work", "outer", "runtime");
+    success_json(sb.receive("runtime", item["event"].as_str().unwrap()));
+    let line: &[u8] = b"ACK(blocked): cr\xe9er avec bytes \xff invalid";
+    let mut appended = line.to_vec();
+    appended.push(b'\n');
+    assert!(sb.shell_append(&appended).status.success());
+
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let repo_root = sb.root.join("repo");
+    fs::create_dir_all(&repo_root).unwrap();
+    let run = |tool: &PathBuf| {
+        Command::new("bash")
+            .arg(script("olp-evo-harvest.sh"))
+            .arg(&repo_root)
+            .arg("--dry-run")
+            .env("OLP_EVO_REVIEW_BOARD", &sb.board)
+            .env("OLP_EVO_MCP_BOARD", sb.root.join("missing-mcp.md"))
+            .env("OLP_EVO_STATE", sb.root.join("harvest-state"))
+            .env("OLP_EVO_BOARD", sb.root.join("EVOLUTION.md"))
+            .env("OLP_BOARD_EVENT_TOOL", tool)
+            .env("TMPDIR", &tmp)
+            .output()
+            .unwrap()
+    };
+    let leftovers = || {
+        fs::read_dir(&tmp)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("olp-evo-board")
+            })
+            .count()
+    };
+
+    let carded = run(&script("olp-board-event.py"));
+    assert!(
+        carded.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&carded.stderr)
+    );
+    let text = String::from_utf8_lossy(&carded.stdout);
+    assert_eq!(text.matches("### EVO-").count(), 1, "{text}");
+    assert!(
+        text.contains(&format!("#-1#blocked#{}", sha256_hex(line))),
+        "{text}"
+    );
+    assert_eq!(leftovers(), 0);
+
+    let wrapper = sb.file(
+        "corrupt-snapshot.py",
+        format!(
+            r#"import subprocess, sys
+real = {real:?}
+if sys.argv[1:2] == ["snapshot"]:
+    result = subprocess.run([sys.executable, "-B", real, *sys.argv[1:]], capture_output=True)
+    sys.stdout.write('{{"events": [], "drift": [], "fenced_ranges": 7, "quarantine_evidence": [], "recovery_evidence": []}}\n')
+    sys.exit(result.returncode)
+sys.exit(subprocess.run([sys.executable, "-B", real, *sys.argv[1:]]).returncode)
+"#,
+            real = script("olp-board-event.py").to_str().unwrap(),
+        )
+        .as_bytes(),
+    );
+    let failed_run = run(&wrapper);
+    assert!(!failed_run.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed_run.stderr).contains("error:"),
+        "stderr={}",
+        String::from_utf8_lossy(&failed_run.stderr)
+    );
+    assert_eq!(
+        leftovers(),
+        0,
+        "a failed harvest left its temporary directory behind"
+    );
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: event record, verify, item and void CLIs.
+/// - Production path: strict JSON loading of every JSON input file and the CLI error contract.
+/// - External edges faked: a generated JSON file nested 200,000 levels deep.
+/// - What this proves: the recursion error such input raises is reported like any other input error, as one machine JSON on stderr with exit 2, and nothing is written.
+/// - What this intentionally does not exercise: deep JSON on the board itself, which replay already turns into malformed_event.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_event_cli_reports_deep_json_as_one_machine_error
+#[test]
+fn olp_board_event_cli_reports_deep_json_as_one_machine_error() {
+    let sb = Sandbox::new("deep-json");
+    sb.item("1", "First", "outer", "runtime");
+    let deep = sb.file(
+        "deep.json",
+        format!("{}{}", "[".repeat(200_000), "]".repeat(200_000)).as_bytes(),
+    );
+    let record_body = sb.file("deep-record.txt", b"### 2. Second\nBody.\n");
+    let item_body = sb.file("deep-item.txt", b"Body.\n");
+    let explanation = sb.file("deep-void.txt", b"quarantine");
+    let board = sb.board.to_str().unwrap().to_owned();
+    let deep = deep.to_str().unwrap().to_owned();
+    let before = fs::read(&sb.board).unwrap();
+    let invocations: Vec<Vec<String>> = vec![
+        vec![
+            "record",
+            "--board",
+            &board,
+            "--event-file",
+            &deep,
+            "--body-file",
+            record_body.to_str().unwrap(),
+        ],
+        vec!["verify", "--receipt-file", &deep],
+        vec![
+            "item",
+            "--board",
+            &board,
+            "--actor",
+            "outer",
+            "--number",
+            "2",
+            "--title",
+            "Second",
+            "--to",
+            "runtime",
+            "--body-file",
+            item_body.to_str().unwrap(),
+            "--recovery-file",
+            &deep,
+        ],
+        vec![
+            "void",
+            "--board",
+            &board,
+            "--actor",
+            "outer",
+            "--target-file",
+            &deep,
+            "--body-file",
+            explanation.to_str().unwrap(),
+        ],
+    ]
+    .into_iter()
+    .map(|args| args.into_iter().map(str::to_owned).collect())
+    .collect();
+    for args in invocations {
+        let output = Command::new("python3")
+            .arg("-B")
+            .arg(script("olp-board-event.py"))
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{args:?} stderr={stderr}");
+        let lines: Vec<&str> = stderr
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(lines.len(), 1, "{args:?} stderr={stderr}");
+        let error: Value = serde_json::from_str(lines[0]).unwrap();
+        assert!(error["error"].is_string(), "{args:?} {error}");
+        assert_eq!(fs::read(&sb.board).unwrap(), before, "{args:?}");
+    }
+}
