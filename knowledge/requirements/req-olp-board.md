@@ -29,13 +29,13 @@ tags: [olp, protocol, blackboard, observability]
 
 [REQ-OLP-BOARD-SENTINEL] sentinel MUST 启动即补读账本（给出 `--since-head` 时只补读该事件之后的可处理状态），只扫描启动基线后的文字，并用固定 `LEDGER-SIGNAL`/`BOARD-SIGNAL`/`DRIFT`/`ERROR`/`TIMEOUT` 前缀区分信号；普通等待和尾部未完成行两条超时路径 MUST 输出 `TIMEOUT` JSON 行并退出 3；板缩短或替换 MUST 输出 ERROR。
 
-[REQ-OLP-BOARD-HARVEST] 进化采集 MUST 只在板含 `> OLP-EVENT ` 行且回放出至少一条有效事件时走结构化路径；不含此类行的板（包括带旧 shell `.lock` 的 legacy 板）MUST 不调用 Python、不取板锁，输出与 legacy 扫描器逐字节一致；含此类行但无有效事件的板 MUST 回落到 legacy 扫描器；含此类行而事件工具或板 `.lock` 缺失时 MUST 明确非零失败，MUST NOT 静默回落 legacy。结构化路径 MUST 在共享锁下只读取一次板字节，回放、legacy 扫描与结构化扫描都基于这一快照，快照之后的追加留给下一轮；同一 ACK 行在连续各轮 MUST 得到同一个 identity。结构化路径 MUST 复用事件回放器和 item ID 取得展示编号，使乱序 ACK 归属原 item，行字段中的 `|` MUST 被转义，带 recovery 的 ACK MUST 沿用被恢复原行的 legacy identity；MUST 保留 legacy ACK 与签名 override/R2 触发，只抑制围栏区间、已 void 区间、已配对结构化 ACK 及其 recovery 原 ACK 的重复卡。opt-in 后未闭合围栏 MUST 令采集明确非零失败且 MUST NOT 推进采集游标；legacy 采集函数 MUST 保持原行为。
+[REQ-OLP-BOARD-HARVEST] 进化采集 MUST 只在板含 `> OLP-EVENT ` 行且回放出至少一条有效事件时走结构化路径；不含此类行的板（包括带旧 shell `.lock` 的 legacy 板）MUST 不调用 Python、不取板锁，输出与 legacy 扫描器逐字节一致；含此类行但无有效事件的板 MUST 回落到 legacy 扫描器；含此类行而事件工具或板 `.lock` 缺失时 MUST 明确非零失败，MUST NOT 静默回落 legacy。结构化路径 MUST 在共享锁下只读取一次板字节，回放、legacy 扫描与结构化扫描都基于这一快照，快照之后的追加留给下一轮；同一 ACK 行在连续各轮 MUST 得到同一个 identity。结构化路径 MUST 按字节处理候选行，旧 shell 写入的非 UTF-8 旧触发行 MUST 照常出卡；采集任何失败 MUST 以 `error:` 行非零退出，且 MUST 清理自己的临时目录。结构化路径 MUST 复用事件回放器和 item ID 取得展示编号，使乱序 ACK 归属原 item，行字段中的 `|` MUST 被转义，带 recovery 的 ACK MUST 沿用被恢复原行的 legacy identity；MUST 保留 legacy ACK 与签名 override/R2 触发，只抑制围栏区间、已 void 区间、已配对结构化 ACK 及其 recovery 原 ACK 的重复卡。opt-in 后未闭合围栏 MUST 令采集明确非零失败且 MUST NOT 推进采集游标；legacy 采集函数 MUST 保持原行为。
 
 [REQ-OLP-BOARD-COMPAT] 旧 shell watcher MUST 保持运行行为不变；旧 shell 追加器对 legacy 板 MUST 保持不变，只在板已含事件行或 `<!-- olp-board/v1 -->` 标记时拒绝以 `> OLP-EVENT ` 开头的正文行与独立 `ts=` 时间行（判定与 Python 追加器一致，行尾只允许可选 CR），并在这类板经符号链接路径调用时拒绝，MUST NOT 在链接旁另建锁。四个 Python CLI MUST 相邻部署、仅依赖标准库并与旧 shell 共用同一锁文件。
 
 [REQ-OLP-BOARD-DEPLOY] `olp-init.sh` MUST 默认保留 legacy 模板，仅在 `OLP_BOARD_MODE=structured` 且 Python 3 可用时为新项目生成 receive→执行→ack 模板、带 `<!-- olp-board/v1 -->` 标记且无裸 ACK 占位的新板、独立普通锁，并把该锁加入 `.gitignore`；结构化循环 MUST 按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具 MUST 以原文件名相邻安装且 MUST NOT 覆盖既有副本；既有项目文件 MUST NOT 被覆盖，只能输出迁移指引；无 Python 时 MUST 明示结构化能力不可用并保留旧 shell 工具。
 
-[REQ-OLP-BOARD-TEST] 每个合约场景 MUST 绑定一个真实 Rust 集成测试函数，由测试直接调用生产 Python CLI、真实临时文件、真实旧 shell 锁和真实 harvest；故障注入 MUST 只存在于测试进程，生产 CLI MUST NOT 暴露故障后门。所有写入口失败 MUST 只输出一个机器 JSON，写前失败为 `may_have_appended=false`，write/fsync/readback/回执输出边界后的失败为 true。
+[REQ-OLP-BOARD-TEST] 每个合约场景 MUST 绑定一个真实 Rust 集成测试函数，由测试直接调用生产 Python CLI、真实临时文件、真实旧 shell 锁和真实 harvest；故障注入 MUST 只存在于测试进程，生产 CLI MUST NOT 暴露故障后门。所有写入口失败（包括嵌套过深的 JSON 输入引发的递归错误）MUST 只输出一个机器 JSON，写前失败为 `may_have_appended=false`，write/fsync/readback/回执输出边界后的失败为 true。
 
 ## Scenarios
 
@@ -149,6 +149,16 @@ Scenario: 结构化板缺事件工具或板锁时采集明确失败
   When 分别在事件工具缺失与板锁缺失时运行真实进化采集脚本
   Then 两次都非零退出并指明缺失项，不输出卡片；工具与锁齐全时恰有一张含 R8-1 的卡
 
+Scenario: 非 UTF-8 旧触发行照常采集且失败不留临时目录
+  Given 已 opt-in 的板上有一条经旧 shell 追加、含非 UTF-8 字节的 blocked ACK 行
+  When 运行真实进化采集脚本，并在事件工具返回损坏状态时再运行一次
+  Then 第一次恰有一张卡，identity 与旧扫描器对同一行给出的一致；第二次以 error 行非零退出；两次都不在临时目录留下工作目录
+
+Scenario: 嵌套过深的 JSON 输入只得到一个机器错误
+  Given 一个嵌套二十万层的 JSON 文件
+  When 把它作为 record 的事件文件、verify 的回执文件、item 的 recovery 文件和 void 的 target 文件
+  Then 每次都退出 2，stderr 恰为一个 JSON 对象，板字节不变
+
 Scenario: 采集只读一次快照
   Given 编号为 R8-1 的 item 已被 receive，其 blocked ACK 恰在采集取得快照之后追加
   When 连续运行两轮真实进化采集脚本
@@ -204,6 +214,7 @@ Scenario: legacy 与无 Python 降级保持可用
 - operator 2026-09-27 要求按上游需求与 spec 规范交付。
 - PR #668 评审发现：坏行使账本不可用、手写 ACK 变体漏检、升级无法关闭、旧板采集行为改变、CR 切行不一致与回放规模。
 - PR #668 维护者评审（2026-09-28）：init 测试依赖全局安装的 octoscode、source 区间可越过行首与已配对区间重叠、采集静默降级改变 ACK identity 且快照与扫描之间有竞态、围栏内 ts 行与事件行处理不对称、旧 shell 的符号链接与 ts 判定与 Python 工具不一致。
+- PR #668 维护者复审（2026-09-28 17:14Z，基于 `4c5e0ef`）：非 UTF-8 旧触发行让结构化采集崩溃、不出卡并遗留临时目录；嵌套过深的 JSON 让事件 CLI 输出原始 traceback 而不是机器 JSON。
 
 ## Open Questions
 
