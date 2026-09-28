@@ -13,9 +13,9 @@ tags: [olp, protocol, blackboard, observability]
 
 ## Requirements
 
-[REQ-OLP-BOARD-APPEND] 系统 MUST 只使用预先存在的规范板文件及其独立普通 `.lock` 文件，在一次独占锁持有期间完成 UTF-8 正文校验、offset/prev/id/UTC 时间生成、追加、fsync 和固定区间回读；失败 MUST 报告 `may_have_appended`，MUST NOT 自动重建锁、截断板或盲目重试。板以无 LF 的半行结尾时，普通写入 MUST 拒绝，只有以该半行为目标的 `void` MAY 先补 LF 再追加。符号链接形式的板路径 MUST 被拒绝，避免与旧 shell 分裂锁域。
+[REQ-OLP-BOARD-APPEND] 系统 MUST 只使用预先存在的规范板文件及其独立普通 `.lock` 文件，在一次独占锁持有期间完成 UTF-8 正文校验、offset/prev/id/UTC 时间生成、追加、fsync 和固定区间回读；失败 MUST 报告 `may_have_appended`，MUST NOT 自动重建锁、截断板或盲目重试。板以无 LF 的半行结尾时，普通写入 MUST 拒绝，只有以该半行为目标的 `void` MAY 先补 LF 再追加。符号链接形式的板路径 MUST 被拒绝，避免与旧 shell 分裂锁域。独立 `ts=` 时间行（行尾只允许可选 CR）MUST 被拒绝，围栏内的示例也不例外，示例须缩进或改写。
 
-[REQ-OLP-BOARD-SCHEMA] 结构化事件 MUST 使用 `schema="olp-board/v1"` 与 item、receive、ack、review、withdraw、resolve、void 七种事件，事件行固定以 `> OLP-EVENT ` 开头，共用严格 canonical JSON、32 位十六进制 id、prev 链、actor、UTC ts 和同板 source；item 与 ack MUST 含必需但可空的 `recovery`，void MUST 含 `target` 字节证据；未知字段、重复 JSON key、非有限数、bool 冒充整数、坏链、坏证据和语义不匹配正文 MUST NOT 进入账本。行 MUST 只以 LF 切分，裸 CR 是普通内容。
+[REQ-OLP-BOARD-SCHEMA] 结构化事件 MUST 使用 `schema="olp-board/v1"` 与 item、receive、ack、review、withdraw、resolve、void 七种事件，事件行固定以 `> OLP-EVENT ` 开头，共用严格 canonical JSON、32 位十六进制 id、prev 链、actor、UTC ts 和同板 source；item 与 ack MUST 含必需但可空的 `recovery`，void MUST 含 `target` 字节证据；未知字段、重复 JSON key、非有限数、bool 冒充整数、坏链、坏证据和语义不匹配正文 MUST NOT 进入账本。行 MUST 只以 LF 切分，裸 CR 是普通内容。事件 source MUST 从行首开始（仅 void 收口半行时可以补上的 LF 开头），且 MUST NOT 与已配对或已被 recovery、void 消费的字节重叠，否则该事件行是 `malformed_event`。
 
 [REQ-OLP-BOARD-LIFECYCLE] 每个 item MUST 至多 receive 一次、终态 ack 一次、review 一次；receive 与 ack actor MUST 匹配 item.to，review、withdraw、resolve actor MUST 匹配 item.actor；wontdo MUST NOT return，return 与 blocked 恢复 MUST 使用新 item；未被 receive 的 item MAY 被作者 withdraw 一次，已 receive 的 item MUST NOT withdraw；escalate MUST 保持待人工处置，直到作者以 resolve 关闭并可指向另一个既有后续 item。
 
@@ -29,9 +29,9 @@ tags: [olp, protocol, blackboard, observability]
 
 [REQ-OLP-BOARD-SENTINEL] sentinel MUST 启动即补读账本（给出 `--since-head` 时只补读该事件之后的可处理状态），只扫描启动基线后的文字，并用固定 `LEDGER-SIGNAL`/`BOARD-SIGNAL`/`DRIFT`/`ERROR`/`TIMEOUT` 前缀区分信号；普通等待和尾部未完成行两条超时路径 MUST 输出 `TIMEOUT` JSON 行并退出 3；板缩短或替换 MUST 输出 ERROR。
 
-[REQ-OLP-BOARD-HARVEST] 进化采集 MUST 只在板含 `> OLP-EVENT ` 行且回放出至少一条有效事件时走结构化路径；不含此类行的板（包括带旧 shell `.lock` 的 legacy 板）MUST 不调用 Python、不取板锁，输出与 legacy 扫描器逐字节一致；含此类行但无有效事件的板 MUST 回落到 legacy 扫描器。结构化路径 MUST 复用事件回放器和 item ID 取得展示编号，使乱序 ACK 归属原 item，行字段中的 `|` MUST 被转义，带 recovery 的 ACK MUST 沿用被恢复原行的 legacy identity；MUST 保留 legacy ACK 与签名 override/R2 触发，只抑制围栏区间、已 void 区间、已配对结构化 ACK 及其 recovery 原 ACK 的重复卡。opt-in 后未闭合围栏 MUST 令采集明确非零失败且 MUST NOT 推进采集游标；legacy 采集函数 MUST 保持原行为。
+[REQ-OLP-BOARD-HARVEST] 进化采集 MUST 只在板含 `> OLP-EVENT ` 行且回放出至少一条有效事件时走结构化路径；不含此类行的板（包括带旧 shell `.lock` 的 legacy 板）MUST 不调用 Python、不取板锁，输出与 legacy 扫描器逐字节一致；含此类行但无有效事件的板 MUST 回落到 legacy 扫描器；含此类行而事件工具或板 `.lock` 缺失时 MUST 明确非零失败，MUST NOT 静默回落 legacy。结构化路径 MUST 在共享锁下只读取一次板字节，回放、legacy 扫描与结构化扫描都基于这一快照，快照之后的追加留给下一轮；同一 ACK 行在连续各轮 MUST 得到同一个 identity。结构化路径 MUST 复用事件回放器和 item ID 取得展示编号，使乱序 ACK 归属原 item，行字段中的 `|` MUST 被转义，带 recovery 的 ACK MUST 沿用被恢复原行的 legacy identity；MUST 保留 legacy ACK 与签名 override/R2 触发，只抑制围栏区间、已 void 区间、已配对结构化 ACK 及其 recovery 原 ACK 的重复卡。opt-in 后未闭合围栏 MUST 令采集明确非零失败且 MUST NOT 推进采集游标；legacy 采集函数 MUST 保持原行为。
 
-[REQ-OLP-BOARD-COMPAT] 旧 shell watcher MUST 保持运行行为不变；旧 shell 追加器对 legacy 板 MUST 保持不变，只在板已含事件行或 `<!-- olp-board/v1 -->` 标记时拒绝以 `> OLP-EVENT ` 开头的正文行与独立 `ts=` 时间行。四个 Python CLI MUST 相邻部署、仅依赖标准库并与旧 shell 共用同一锁文件。
+[REQ-OLP-BOARD-COMPAT] 旧 shell watcher MUST 保持运行行为不变；旧 shell 追加器对 legacy 板 MUST 保持不变，只在板已含事件行或 `<!-- olp-board/v1 -->` 标记时拒绝以 `> OLP-EVENT ` 开头的正文行与独立 `ts=` 时间行（判定与 Python 追加器一致，行尾只允许可选 CR），并在这类板经符号链接路径调用时拒绝，MUST NOT 在链接旁另建锁。四个 Python CLI MUST 相邻部署、仅依赖标准库并与旧 shell 共用同一锁文件。
 
 [REQ-OLP-BOARD-DEPLOY] `olp-init.sh` MUST 默认保留 legacy 模板，仅在 `OLP_BOARD_MODE=structured` 且 Python 3 可用时为新项目生成 receive→执行→ack 模板、带 `<!-- olp-board/v1 -->` 标记且无裸 ACK 占位的新板、独立普通锁，并把该锁加入 `.gitignore`；结构化循环 MUST 按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具 MUST 以原文件名相邻安装且 MUST NOT 覆盖既有副本；既有项目文件 MUST NOT 被覆盖，只能输出迁移指引；无 Python 时 MUST 明示结构化能力不可用并保留旧 shell 工具。
 
@@ -61,8 +61,13 @@ Scenario: 隔离事件收口坏行与半截写入
 
 Scenario: 旧 shell 在已 opt-in 板上拒绝事件行
   Given legacy 板、带 opt-in 标记的板和已有事件的板
-  When 旧 shell 追加以 `> OLP-EVENT ` 开头的正文
-  Then legacy 板照旧写入，另两块板退出 2 且字节不变，普通文字仍可追加
+  When 旧 shell 追加以 `> OLP-EVENT ` 开头的正文、以可选 CR 结尾的独立 `ts=` 行，以及行尾带空格的 `ts=` 行
+  Then legacy 板照旧写入，另两块板对事件行与 ts 行退出 2 且字节不变，行尾带空格的 ts 行与普通文字仍可追加，与 Python 追加器判定一致
+
+Scenario: 越过行首或与已配对原文重叠的 source 被隔离
+  Given 一条已配对的 item 记录，以及手工写入的两个 item 事件：一个 source 从板头开始、覆盖该记录和一行引用 ACK，一个 source 从行中间开始
+  When 运行 state，并对被覆盖的引用 ACK 行运行 void
+  Then 两个手工事件都以 malformed_event 进入 DRIFT，账本只有原 item；引用 ACK 行只能被 void 消费一次
 
 Scenario: legacy 与 mixed 漂移
   Given opt-in 前旧 ACK、opt-in 后围栏示例、引用标题和新的未配对 item/ACK 与引用 ACK
@@ -139,6 +144,16 @@ Scenario: legacy 板采集逐字节不变
   When 运行真实进化采集脚本
   Then 输出与 legacy 扫描器一致，既不调用 python3 也不等锁
 
+Scenario: 结构化板缺事件工具或板锁时采集明确失败
+  Given 一块已有结构化事件的板
+  When 分别在事件工具缺失与板锁缺失时运行真实进化采集脚本
+  Then 两次都非零退出并指明缺失项，不输出卡片；工具与锁齐全时恰有一张含 R8-1 的卡
+
+Scenario: 采集只读一次快照
+  Given 编号为 R8-1 的 item 已被 receive，其 blocked ACK 恰在采集取得快照之后追加
+  When 连续运行两轮真实进化采集脚本
+  Then 第一轮不为该 ACK 出卡，第二轮以含 R8-1 的结构化 identity 出卡，两轮合计只有一个 identity
+
 Scenario: 乱序 ACK 精确采集
   Given legacy/签名触发与 item 1、item 2 的终态 ACK 以 2 后 1 的顺序并存
   When 运行真实进化采集脚本
@@ -166,16 +181,16 @@ Scenario: 写入故障机器可判定
 
 Scenario: 符号链接板被拒绝
   Given 指向真实板的符号链接路径
-  When 通过它运行 item、state 与普通追加
-  Then 三者都退出 2 且板字节不变
+  When 通过它运行 item、state、普通追加，以及对已 opt-in 板的旧 shell 追加
+  Then 四者都退出 2，板字节不变，链接旁不生成锁
 
 Scenario: 结构化部署可实际运行且幂等
-  Given 临时 HOME 和新建临时 git 项目
+  Given 临时 HOME、新建临时 git 项目，以及 PATH 前放置的 octoscode/octos 空桩（结果不取决于机器上是否全局安装）
   When 以 structured 模式运行 init 并调用安装后的四个生产工具完成生命周期
   Then 新模板含 opt-in 标记、锁被 git 忽略，重复 init 不覆盖项目文件、锁或已安装工具
 
 Scenario: legacy 与无 Python 降级保持可用
-  Given 默认 init 或 PATH 中没有 Python 的临时项目
+  Given 默认 init（PATH 前放置 octoscode/octos 空桩）或 PATH 中没有 Python 的临时项目
   When 运行真实 init
   Then 默认模板仍走旧 ACK 契约且无 Python 时只禁用结构化能力并继续安装旧 shell 工具
 
@@ -188,6 +203,7 @@ Scenario: legacy 与无 Python 降级保持可用
 
 - operator 2026-09-27 要求按上游需求与 spec 规范交付。
 - PR #668 评审发现：坏行使账本不可用、手写 ACK 变体漏检、升级无法关闭、旧板采集行为改变、CR 切行不一致与回放规模。
+- PR #668 维护者评审（2026-09-28）：init 测试依赖全局安装的 octoscode、source 区间可越过行首与已配对区间重叠、采集静默降级改变 ACK identity 且快照与扫描之间有竞态、围栏内 ts 行与事件行处理不对称、旧 shell 的符号链接与 ts 判定与 Python 工具不一致。
 
 ## Open Questions
 
