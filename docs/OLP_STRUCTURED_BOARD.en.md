@@ -190,7 +190,10 @@ beside the board and the adjacent event tool are therefore prerequisites:
 when a board already has event lines and either is missing, harvest fails
 non-zero and says which, instead of silently switching to the legacy scanner
 (which would card the same ACK again under another identity). Legacy boards
-without event lines are unaffected.
+without event lines are unaffected. The legacy shell appender does not check
+UTF-8, so a legacy trigger line may carry other bytes; the structured path
+still cards it. Any failed harvest run exits with an `error:` line and removes
+its temporary directory.
 
 To reconcile, copy the exact `offset`, `length` and `sha256` of the entry (or
 of `partial_tail`) from `state` into a file:
