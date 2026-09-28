@@ -55,7 +55,8 @@ TOOLS="$HOME/.octos/outer"
 ```
 
 板和 `<板>.lock` 必须事先存在且都是普通文件；板路径本身是符号链接时工具直接
-拒绝（旧 shell 锁的是 `<链接>.lock`，新工具若跟随链接会锁 `<目标>.lock`）。
+拒绝（旧 shell 锁的是 `<链接>.lock`，新工具若跟随链接会锁 `<目标>.lock`）；旧
+`olp-board-append.sh` 在已 opt-in 的板上经符号链接调用时同样拒绝，不会在链接旁建锁。
 事件工具在同一次独占持锁期间追加可读正文、`> OLP-EVENT <canonical-json>` 和
 UTC `ts=` 行，随后 fsync 并回读固定区间。读者（state、inbox、sentinel、verify）
 只在共享锁下复制字节，释放锁后再回放，互不阻塞。这个保证只覆盖使用同一锁的
@@ -71,7 +72,8 @@ UTC `ts=` 行，随后 fsync 并回读固定区间。读者（state、inbox、se
 闭合围栏。
 
 旧 `olp-board-append.sh` 在 legacy 板上行为不变；板里已有事件行或
-`<!-- olp-board/v1 -->` 标记时，它拒绝以 `> OLP-EVENT ` 开头的正文行和独立的 `ts=` 时间行，
+`<!-- olp-board/v1 -->` 标记时，它拒绝以 `> OLP-EVENT ` 开头的正文行和独立的 `ts=` 时间行（与 `olp-board-append.py`
+同一判定：时间戳后只允许一个可选的 CR），
 其余文字照常追加。
 
 逻辑 `actor` 不是 OS 身份认证，也不校验 `outer-duty` 的 R7 lease。调用者仍须按
@@ -179,7 +181,7 @@ python3 -B "$TOOLS/olp-board-append.py" verify \
 ```
 
 `OFFSET` 与 `UTC_TS` 取自保存的追加回执。普通追加器拒绝事件前缀和调用者
-伪造的独立 `ts=` 行。
+伪造的独立 `ts=` 行，已闭合围栏里的示例也不例外；示例中的时间行请缩进或改写（如 `ts: …`）。
 
 ## 查询与观察
 
@@ -224,7 +226,7 @@ sentinel 不会自动开 turn、派单或执行，也不替代
 
 | kind | 何时出现 | 收口方式 |
 |---|---|---|
-| `malformed_event` | 任意位置一条未进围栏的 `> OLP-EVENT ` 行未通过校验（坏 JSON、非 canonical、source 不相邻或字节被改、ts 边界不对、坏链、非法生命周期、坏 recovery/void）；证据是该行不含 LF 的字节 | `void` |
+| `malformed_event` | 任意位置一条未进围栏的 `> OLP-EVENT ` 行未通过校验（坏 JSON、非 canonical、source 不相邻、不从行首开始、与已配对或已消费的文字重叠，或字节被改、ts 边界不对、坏链、非法生命周期、坏 recovery/void）；证据是该行不含 LF 的字节 | `void` |
 | `unpaired_item` | opt-in 后未与事件配对的 `### 编号. 标题` 行 | 同编号标题的 `item --recovery-file`，或 `void` |
 | `unpaired_ack` | opt-in 后未配对、符合 v1 语法的 ACK 行（允许前导空白、全角冒号与 CRLF） | outcome 相同的 `ack --recovery-file`，或 `void` |
 | `suspected_ack` | opt-in 后未配对的疑似手写 ACK：`> ACK(`、`- ACK(`、`### ACK`、`**ACK(...)**`、行内 `ACK(`、旧式 `ACK:`（仅以 ACK 一词开头的普通文字不算，但任何 `ACK(` 都算） | 行内有 `ACK(outcome)` 时可用同 outcome 的 ack recovery，否则只能 `void` |
@@ -243,6 +245,13 @@ sentinel 不会自动开 turn、派单或执行，也不替代
 `DRIFT`，harvest 明确非零失败且不推进采集游标。人工核对后，只能追加匹配的
 闭合行；工具不删除、移动或重写旧字节。补闭合后结构化写入恢复，但围栏内文字
 仍是示例，不能成为 recovery 或 void 的对象。
+
+进化采集（`olp-evo-harvest.sh`）对含事件行的板走结构化路径：它经
+`olp-board-event.py snapshot` 在共享锁下只读一次板字节，回放、旧扫描器和结构化
+扫描都用这份快照，采集期间新追加的文字整条留到下一轮，同一条 ACK 在各轮只有一个
+identity。因此板旁的 `.lock` 和相邻安装的事件工具是结构化采集的前提：板里已有事件行
+而二者缺一时，harvest 明确非零失败并指明缺什么，不会静默改用旧扫描器（那样同一条 ACK
+会换一个 identity 再出一张卡）。不含事件行的 legacy 板不受影响。
 
 收口时从 `state` 输出取得该条 DRIFT（或 `partial_tail`）的精确 `offset`、
 `length`、`sha256`，只把这三个字段写入证据文件：

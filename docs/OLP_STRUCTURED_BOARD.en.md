@@ -47,7 +47,9 @@ TOOLS="$HOME/.octos/outer"
 
 - The board and `<board>.lock` must already exist as regular files. A board
   path that is a symlink is refused: the legacy shell locks `<link>.lock`, so
-  following the link would split the lock domain.
+  following the link would split the lock domain. The legacy
+  `olp-board-append.sh` also refuses a symlinked path to an opted-in board and
+  never creates `<link>.lock` for it.
 - Writers hold the lock exclusively while they append the readable text, the
   `> OLP-EVENT <canonical-json>` line and a UTC `ts=` line, then fsync and read
   the range back. Readers (`state`, inbox, sentinel, `verify`) copy the bytes
@@ -67,7 +69,9 @@ TOOLS="$HOME/.octos/outer"
   with LF.
 - The legacy `olp-board-append.sh` is unchanged on legacy boards. Once the
   board has an event line or the opt-in marker, it refuses body lines that
-  start with `> OLP-EVENT ` and standalone `ts=` lines; other text is appended
+  start with `> OLP-EVENT ` and standalone `ts=` lines (judged exactly as
+  `olp-board-append.py` does: only an optional CR may follow the timestamp);
+  other text is appended
   as before.
 - `actor` is a logical name, not an OS identity, and nothing here enforces the
   R7 outer-duty lease.
@@ -124,7 +128,8 @@ python3 -B "$TOOLS/olp-board-event.py" verify --receipt-file item-receipt.json
 `--commit` takes a full 40- or 64-hex object name. `--r2` is `verified`,
 `partially-verified` or `unverified` and must match what was actually run.
 Plain notes go through `olp-board-append.py append` (it refuses event prefixes
-and caller-supplied `ts=` lines) and can be re-checked with
+and caller-supplied standalone `ts=` lines, fenced examples included; indent or
+reword a timestamp line in an example, e.g. `ts: …`) and can be re-checked with
 `olp-board-append.py verify --offset … --ts …`.
 
 ## Queries and watching
@@ -162,7 +167,7 @@ Any DRIFT sets `mode=mixed` and `dispatch_blocked=true`. Each entry carries
 
 | kind | When | Reconcile with |
 |---|---|---|
-| `malformed_event` | an unfenced `> OLP-EVENT ` line anywhere fails validation (bad JSON, non-canonical, non-adjacent or changed source, wrong `ts=` boundary, broken chain, illegal transition, bad recovery/void); evidence is the line without its LF | `void` |
+| `malformed_event` | an unfenced `> OLP-EVENT ` line anywhere fails validation (bad JSON, non-canonical, a source that is not adjacent, does not start at a line boundary, overlaps text already paired or consumed, or was changed, wrong `ts=` boundary, broken chain, illegal transition, bad recovery/void); evidence is the line without its LF | `void` |
 | `unpaired_item` | after opt-in, a `### number. title` line with no event | `item --recovery-file` with the same number and title, or `void` |
 | `unpaired_ack` | after opt-in, an unpaired ACK line in v1 grammar (leading whitespace, a full-width colon and CRLF allowed) | `ack --recovery-file` with the same outcome, or `void` |
 | `suspected_ack` | after opt-in, an unpaired hand-written ACK variant: `> ACK(`, `- ACK(`, `### ACK`, `**ACK(...)**`, inline `ACK(`, the retired `ACK:` (prose that merely starts with the word ACK is not flagged, but any `ACK(` is) | ACK recovery if the line contains `ACK(outcome)` with the same outcome, otherwise `void` |
@@ -175,6 +180,17 @@ lines are flagged anywhere; voiding one on a board without any valid event
 makes that void the first event, which opts the board in. **Put examples inside closed code
 fences**: a quoted ACK is treated as a suspected hand-written ACK, because lanes
 really do write `> ACK(...)` and `### ACK` variants and those must not be missed.
+
+Evolution harvest (`olp-evo-harvest.sh`) takes the structured path on a board
+with event lines. It reads the board once, under the shared lock, through
+`olp-board-event.py snapshot`, and the replay, the legacy scanner and the
+structured scan all use that copy: text appended during a run waits, whole,
+for the next run, and each ACK keeps one identity across runs. The `.lock`
+beside the board and the adjacent event tool are therefore prerequisites:
+when a board already has event lines and either is missing, harvest fails
+non-zero and says which, instead of silently switching to the legacy scanner
+(which would card the same ACK again under another identity). Legacy boards
+without event lines are unaffected.
 
 To reconcile, copy the exact `offset`, `length` and `sha256` of the entry (or
 of `partial_tail`) from `state` into a file:
