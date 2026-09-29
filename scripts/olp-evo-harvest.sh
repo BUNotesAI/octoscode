@@ -227,6 +227,11 @@ PY
 # adds exact item ownership without double counting.
 harvest_combined_board() { # realpath
     local rp=$1 work live=$BOARD
+    # Candidate rows are `|`-separated lines and identities embed the board
+    # path, so a path with `|` or a newline cannot be carried: refuse it plainly.
+    case $rp in
+        *'|'*|*$'\n'*) die "structured harvest cannot card a board whose path contains '|' or a newline: $rp" ;;
+    esac
     work=$(mktemp -d "${TMPDIR:-/tmp}/olp-evo-board.XXXXXX") || die "cannot create a temporary directory"
     COMBINED_WORK=$work
     # One read of the board under its shared lock feeds the replay, the legacy

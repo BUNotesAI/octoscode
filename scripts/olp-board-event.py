@@ -133,9 +133,17 @@ def content(line):
     return line[:-1] if line.endswith(b"\n") else line
 
 
+def visible(line):
+    """The line as the legacy harvest scanner sees it: bash `read` drops NUL bytes."""
+    return line.replace(b"\0", b"")
+
+
 def normative_kind(line):
     if line.startswith(PREFIX):
         return None
+    # Judge the line as the legacy scanner reads it, so a NUL splitting a
+    # keyword cannot hide an ACK that harvest still cards.
+    line = visible(line)
     if ITEM_LINE.fullmatch(line):
         return "item"
     if ACK_LINE.fullmatch(line):
@@ -370,6 +378,7 @@ class State:
         if recovery is None:
             return
         raw, kind = self.normative_target(recovery, event["source"]["offset"], "Recovery")
+        raw = visible(raw)
         if event["type"] == "item":
             match = ITEM_LINE.fullmatch(raw)
             require(kind == "item" and match is not None,
@@ -754,13 +763,24 @@ def finite_nonnegative(value):
     return number
 
 
+class MachineArgumentParser(argparse.ArgumentParser):
+    """Report an argument error like any other write-entry failure: one machine JSON."""
+
+    def error(self, message):
+        print(json.dumps({"verified": False, "error": self.prog + ": " + message,
+                          "may_have_appended": False, "execution_authorized": False},
+                         ensure_ascii=False), file=sys.stderr, flush=True)
+        raise SystemExit(2)
+
+
 def add_writer_options(parser):
     parser.add_argument("--board", required=True)
     parser.add_argument("--lock-timeout", type=finite_nonnegative, default=10.0)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    # Subcommand parsers inherit the parser class, so they report the same way.
+    parser = MachineArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
     item = sub.add_parser("item")

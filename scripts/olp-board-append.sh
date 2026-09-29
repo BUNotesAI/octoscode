@@ -27,6 +27,12 @@ if [ -L "$BOARD" ] && LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
     echo "error: $BOARD is a symlink to an olp-board/v1 board; use the real path so every tool shares one lock" >&2
     exit 2
 fi
+# Each name of a hard-linked board would lock its own <name>.lock as well.
+if [ -n "$(find "$BOARD" -prune -links +1 2>/dev/null)" ] \
+    && LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
+    echo "error: $BOARD is an olp-board/v1 board with more than one hard link; keep exactly one link so every tool shares one lock" >&2
+    exit 2
+fi
 exec 9>"$LOCK"
 flock -x 9
 # A board that opted in to olp-board/v1 reserves `> OLP-EVENT ` lines and

@@ -95,16 +95,22 @@ def write_all(fd, payload):
 
 
 def board_path(value):
-    """Resolve the canonical board path and refuse a symlinked board.
+    """Resolve the canonical board path and refuse a symlinked or hard-linked board.
 
-    The legacy shell locks `<given path>.lock`; resolving a symlinked board
-    would put these tools on `<target>.lock` and split the lock domain.
-    Directory symlinks are harmless because the lock sits beside the board.
+    Every tool locks `<board path>.lock`. The legacy shell would lock
+    `<link>.lock` for a symlinked board while these tools resolve it to
+    `<target>.lock`, and each name of a hard-linked board has a lock of its
+    own; either way one board ends up in two lock domains. Directory symlinks
+    are harmless because the lock sits beside the board.
     """
     if os.path.islink(str(value)):
         raise ValueError("Board path is a symlink; pass the real board path so every "
                          "writer shares one lock")
-    return Path(value).resolve(strict=True)
+    path = Path(value).resolve(strict=True)
+    if path.stat().st_nlink != 1:
+        raise ValueError("Board has more than one hard link; each name would lock its own "
+                         "<name>.lock, so keep exactly one link to the board")
+    return path
 
 
 def _paths(board_path_value, body_path=None):
@@ -238,6 +244,17 @@ def run(args, progress):
                 return _receipt(board, offset, body, payload, ts)
 
 
+class MachineArgumentParser(argparse.ArgumentParser):
+    """Report an argument error like any other failure: one machine JSON, nothing appended."""
+
+    def error(self, message):
+        print(json.dumps({"verified": False, "error": self.prog + ": " + message,
+                          "may_have_appended": False,
+                          "action": "Inspect evidence; never truncate or blindly retry"}),
+              file=sys.stderr, flush=True)
+        raise SystemExit(2)
+
+
 def finite_nonnegative(value):
     number = float(value)
     if not math.isfinite(number) or number < 0:
@@ -246,7 +263,8 @@ def finite_nonnegative(value):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    # Subcommand parsers inherit the parser class, so they report the same way.
+    parser = MachineArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("append", "verify"):
         command = commands.add_parser(name)
