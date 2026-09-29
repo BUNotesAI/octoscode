@@ -64,7 +64,8 @@ def strict_loads(data):
         result = {}
         for key, value in values:
             if key in result:
-                raise ValueError("Duplicate JSON key: " + key)
+                # Escaped: a key may be a lone surrogate that no stream can encode.
+                raise ValueError("Duplicate JSON key: " + json.dumps(key))
             result[key] = value
         return result
 
@@ -508,9 +509,12 @@ class State:
 
     def add_malformed(self, offset, line, error):
         value = content(line)
+        # Every consumer prints the reason as UTF-8 JSON, so it must stay
+        # encodable whatever the damaged line held.
+        reason = str(error).encode("utf-8", "backslashreplace").decode("utf-8")
         self.malformed[offset] = {"offset": offset, "length": len(value),
                                   "sha256": digest(value),
-                                  "reason": "malformed event: " + str(error)}
+                                  "reason": "malformed event: " + reason}
 
     def compute_drift(self):
         drift = []

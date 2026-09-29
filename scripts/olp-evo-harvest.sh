@@ -182,13 +182,15 @@ def exact(evidence):
 def legacy_identity(offset, raw, kind):
     # The identity harvest_board gives this line (nearest `### <digits>`
     # heading above it, sha256 of the line without LF), so a hand-written
-    # ACK carded before its recovery keeps the same card afterwards.
+    # ACK carded before its recovery keeps the same card afterwards. bash
+    # `read` drops NUL bytes, so they count for neither.
     entry = "-1"
-    for line in data[:offset].split(b"\n"):
+    for line in data[:offset].replace(b"\0", b"").split(b"\n"):
         match = HEADING.match(line)
         if match:
             entry = match.group(1).decode("ascii")
-    line_sha = hashlib.sha256(raw[:-1] if raw.endswith(b"\n") else raw).hexdigest()
+    line = raw[:-1] if raw.endswith(b"\n") else raw
+    line_sha = hashlib.sha256(line.replace(b"\0", b"")).hexdigest()
     return f"board:{realpath}#{entry}#{kind}#{line_sha}"
 
 rows = []
@@ -257,11 +259,19 @@ PY
         die "structured board harvest failed: $live"
     fi
     BOARD=$live
-    if ! python3 -B - "$work/state.json" "$work/legacy" "$work/structured" "$work/combined" <<'PY'
+    if ! python3 -B - "$work/state.json" "$work/board" "$work/legacy" "$work/structured" "$work/combined" <<'PY'
 import json, sys
 
-state_path, legacy_path, structured_path, output_path = sys.argv[1:]
+state_path, board_path, legacy_path, structured_path, output_path = sys.argv[1:]
 state = json.load(open(state_path, encoding="utf-8"))
+# bash `read` drops NUL bytes, so the offsets the legacy scanner adds up drift
+# after one while its line numbers do not: place each row by its line number.
+data = open(board_path, "rb").read()
+line_starts = [0]
+position = data.find(b"\n")
+while position >= 0:
+    line_starts.append(position + 1)
+    position = data.find(b"\n", position + 1)
 represented_acks = []
 for event in state.get("events", []):
     if event.get("type") == "ack":
@@ -287,12 +297,13 @@ with open(output_path, "wb") as output:
         if not raw.strip():
             continue
         parts = raw.rstrip(b"\n").split(b"|", 7)
-        point = int(parts[5])
+        point = line_starts[int(parts[4]) - 1]
         if covered(point, suppressed):
             continue
         if parts[0] in (b"ack_blocked", b"ack_wontdo") and covered(point, represented_acks):
             continue
-        output.write(raw)
+        parts[5] = str(point).encode("ascii")
+        output.write(b"|".join(parts) + b"\n")
     output.write(open(structured_path, "rb").read())
 PY
     then

@@ -34,9 +34,20 @@ flock -x 9
 # quarantined as malformed DRIFT, or could re-pair a damaged event. A ts= line
 # ends with an optional CR only, exactly as olp-board-append.py judges it.
 TS_LINE='ts=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'$'\r''?$'
-if LC_ALL=C grep -qE "^(> OLP-EVENT |${TS_LINE})" "$TMP" \
-    && LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
-    echo "error: $BOARD opted in to olp-board/v1; record events with olp-board-event.py" >&2
-    exit 2
+if LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
+    if LC_ALL=C grep -qE "^(> OLP-EVENT |${TS_LINE})" "$TMP"; then
+        echo "error: $BOARD opted in to olp-board/v1; record events with olp-board-event.py" >&2
+        exit 2
+    fi
+    # Like olp-board-append.py, keep every line whole: never leave a partial
+    # line and never continue one, or two appends could splice an event line.
+    if [ -s "$TMP" ] && [ "$(tail -c 1 "$TMP" | od -An -tuC | tr -d ' ')" != 10 ]; then
+        echo "error: $BOARD opted in to olp-board/v1; the entry must end with a newline" >&2
+        exit 2
+    fi
+    if [ -s "$BOARD" ] && [ "$(tail -c 1 "$BOARD" | od -An -tuC | tr -d ' ')" != 10 ]; then
+        echo "error: $BOARD opted in to olp-board/v1 and ends with a partial line; void it with olp-board-event.py first" >&2
+        exit 2
+    fi
 fi
 cat "$TMP" >> "$BOARD"

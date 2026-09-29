@@ -62,6 +62,10 @@ def main(argv=None):
     parser.add_argument("--lock-timeout", type=nonnegative_finite, default=10.0)
     args = parser.parse_args(argv)
     try:
+        # Board text is matched as bytes: the legacy shell appender never
+        # validates UTF-8, and a line it wrote must wake the watcher, not end it.
+        token = os.fsencode(args.token)
+        skips = [os.fsencode(skip) for skip in args.skip_signature]
         inbox = inbox_module()
         board = inbox.event_module().board_module().board_path(args.board)
         stat = board.stat()
@@ -108,12 +112,12 @@ def main(argv=None):
                         return 3
                     time.sleep(min(args.interval, remaining))
                     continue
-                added = raw[:complete].decode("utf-8", errors="strict")
-                hits = [line for line in added.split("\n")
-                        if args.token in line and not any(skip in line for skip in args.skip_signature)]
+                hits = [line for line in raw[:complete].split(b"\n")
+                        if token in line and not any(skip in line for skip in skips)]
                 baseline += complete
                 if hits:
-                    emit("BOARD-SIGNAL", {"token": args.token, "matches": hits[:3],
+                    matches = [line.decode("utf-8", errors="replace") for line in hits[:3]]
+                    emit("BOARD-SIGNAL", {"token": args.token, "matches": matches,
                                           "board": str(board)})
                     return 0
             remaining = deadline - time.monotonic()

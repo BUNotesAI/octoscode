@@ -3611,3 +3611,238 @@ fn olp_board_event_cli_reports_deep_json_as_one_machine_error() {
         assert_eq!(fs::read(&sb.board).unwrap(), before, "{args:?}");
     }
 }
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: event state, runtime inbox, sentinel and olp-evo-harvest.sh --dry-run.
+/// - Production path: a malformed event line's reason flows into every consumer's JSON output.
+/// - External edges faked: a raw file append stands in for a writer that bypasses every guard.
+/// - What this proves: an event line whose JSON repeats a key spelled as a lone surrogate escape is one malformed_event like any other; no consumer fails on the whole board because the reason cannot be printed.
+/// - What this intentionally does not exercise: voiding the line, covered by the void test.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_drift_reasons_stay_printable_for_crafted_json_keys
+#[test]
+fn olp_board_drift_reasons_stay_printable_for_crafted_json_keys() {
+    let sb = Sandbox::new("surrogate-key");
+    sb.item("1", "First", "outer", "runtime");
+    let offset = sb.len();
+    sb.raw_append(b"> OLP-EVENT {\"\\ud800\":1,\"\\ud800\":2}\n");
+
+    let state = sb.state();
+    let malformed: Vec<&Value> = state["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "malformed_event")
+        .collect();
+    assert_eq!(malformed.len(), 1, "{state}");
+    assert_eq!(malformed[0]["offset"], json!(offset));
+    assert!(
+        malformed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Duplicate JSON key: \"\\ud800\""),
+        "{state}"
+    );
+
+    let inbox = success_json(
+        Command::new("python3")
+            .arg("-B")
+            .arg(script("olp-board-inbox.py"))
+            .arg("--board")
+            .arg(&sb.board)
+            .args(["--for", "runtime"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(inbox["dispatch_blocked"], json!(true), "{inbox}");
+
+    let sentinel = Command::new("python3")
+        .arg("-B")
+        .arg(script("olp-board-sentinel.py"))
+        .arg("--board")
+        .arg(&sb.board)
+        .args(["--token", "unused", "--for", "runtime"])
+        .output()
+        .unwrap();
+    assert!(
+        sentinel.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&sentinel.stdout),
+        String::from_utf8_lossy(&sentinel.stderr)
+    );
+    assert!(String::from_utf8_lossy(&sentinel.stdout).starts_with("DRIFT: "));
+
+    let harvest = sb.harvest(&script("olp-board-event.py"), None);
+    assert!(
+        harvest.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&harvest.stderr)
+    );
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: olp-board-sentinel.py polling loop and scripts/olp-board-append.sh.
+/// - Production path: the sentinel's scan of text appended after its baseline.
+/// - External edges faked: temporary boards and a ready file only.
+/// - What this proves: a line from the legacy shell appender, which never validates UTF-8, wakes the sentinel with BOARD-SIGNAL instead of ending it with ERROR.
+/// - What this intentionally does not exercise: ledger signals, covered by the dynamic-signal test.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_sentinel_matches_tokens_in_non_utf8_text
+#[test]
+fn olp_board_sentinel_matches_tokens_in_non_utf8_text() {
+    let sb = Sandbox::new("sentinel-bytes");
+    sb.item("1", "First", "outer", "runtime");
+    let ready = sb.root.join("ready.json");
+    let watcher = Command::new("python3")
+        .arg("-B")
+        .arg(script("olp-board-sentinel.py"))
+        .arg("--board")
+        .arg(&sb.board)
+        .args([
+            "--token",
+            "WAKE-TOKEN",
+            "--for",
+            "outer",
+            "--interval",
+            "0.02",
+            "--timeout",
+            "10",
+            "--ready-file",
+        ])
+        .arg(&ready)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_file(&ready);
+    assert!(
+        sb.shell_append(b"WAKE-TOKEN from a legacy writer: caf\xe9\n")
+            .status
+            .success()
+    );
+    let output = watcher.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let signal: Value = serde_json::from_str(
+        stdout
+            .strip_prefix("BOARD-SIGNAL: ")
+            .unwrap_or_else(|| panic!("no BOARD-SIGNAL in {stdout}"))
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        signal["matches"],
+        json!(["WAKE-TOKEN from a legacy writer: caf\u{fffd}"])
+    );
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: olp-evo-harvest.sh --dry-run, twice.
+/// - Production path: the candidate merge places legacy rows on the snapshot, and a recovering ACK reuses the legacy identity of the recovered line.
+/// - External edges faked: temporary boards only; the harvest script and event tool are not replaced.
+/// - What this proves: bash `read` drops NUL bytes, yet a NUL on the board neither cards one ACK twice nor misplaces the offset of a later legacy trigger.
+/// - What this intentionally does not exercise: committing cards, covered by the identity-after-recovery test.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_harvest_ignores_nul_bytes_like_the_legacy_scanner
+#[test]
+fn olp_board_harvest_ignores_nul_bytes_like_the_legacy_scanner() {
+    let sb = Sandbox::new("harvest-nul");
+    let item = sb.item("8", "Blocked work", "outer", "runtime");
+    let item_id = item["event"].as_str().unwrap();
+    success_json(sb.receive("runtime", item_id));
+    let line: &[u8] = b"ACK(blocked): power\0 supply lost\n";
+    let offset = sb.len();
+    assert!(sb.shell_append(line).status.success());
+    // The legacy scanner reads lines with bash `read`, which drops NUL.
+    let scanner_identity = format!(
+        "#8#blocked#{}",
+        sha256_hex(b"ACK(blocked): power supply lost")
+    );
+    let cards = |output: Output| -> Vec<String> {
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .split("### EVO-")
+            .skip(1)
+            .map(str::to_owned)
+            .collect()
+    };
+
+    let first = cards(sb.harvest(&script("olp-board-event.py"), None));
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].contains(&scanner_identity), "{first:?}");
+
+    success_json(sb.ack_recovering(item_id, "blocked", &source_ref(offset, line)));
+    let signed_at = sb.len();
+    assert!(
+        sb.shell_append("> 外环(outer)·R2 记档(#8): checked by hand\n".as_bytes())
+            .status
+            .success()
+    );
+    let second = cards(sb.harvest(&script("olp-board-event.py"), None));
+    assert_eq!(second.len(), 2, "{second:?}");
+    let blocked: Vec<&String> = second
+        .iter()
+        .filter(|card| card.contains("#blocked#"))
+        .collect();
+    assert_eq!(blocked.len(), 1, "{second:?}");
+    assert!(blocked[0].contains(&scanner_identity), "{second:?}");
+    let signed = second
+        .iter()
+        .find(|card| card.contains("trigger: r2_record"))
+        .unwrap_or_else(|| panic!("no R2 card in {second:?}"));
+    assert!(
+        signed.contains(&format!(" offset={signed_at} ")),
+        "{signed}"
+    );
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: scripts/olp-board-append.sh.
+/// - Production path: the legacy helper's opted-in guard, under its own lock.
+/// - External edges faked: temporary boards; a raw append stands in for a writer that ignores the lock.
+/// - What this proves: on an opted-in board the legacy helper, like the Python appender, neither leaves a partial line nor continues one, so two appends cannot splice an event line; legacy boards keep the old behaviour.
+/// - What this intentionally does not exercise: voiding the partial line, covered by the void test.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_legacy_shell_keeps_lines_whole_on_opted_in_boards
+#[test]
+fn olp_board_legacy_shell_keeps_lines_whole_on_opted_in_boards() {
+    let legacy = Sandbox::new("shell-whole-legacy");
+    assert!(legacy.shell_append(b"> OLP-").status.success());
+    assert!(legacy.shell_append(b"EVENT {spliced}\n").status.success());
+    assert_eq!(fs::read(&legacy.board).unwrap(), b"> OLP-EVENT {spliced}\n");
+
+    let sb = Sandbox::new("shell-whole");
+    sb.item("1", "Opted in", "outer", "runtime");
+    let before = fs::read(&sb.board).unwrap();
+    for body in [b"> OLP-".as_slice(), b"note without newline".as_slice()] {
+        let refused = sb.shell_append(body);
+        assert_eq!(refused.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("must end with a newline"),
+            "stderr={}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert_eq!(fs::read(&sb.board).unwrap(), before);
+    }
+    assert!(sb.shell_append(b"EVENT {spliced}\n").status.success());
+    assert_eq!(drift_kinds(&sb.state()), Vec::<String>::new());
+
+    sb.raw_append(b"partial line from a writer that ignores the lock");
+    let tail = fs::read(&sb.board).unwrap();
+    let refused = sb.shell_append(b"next entry\n");
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("ends with a partial line"),
+        "stderr={}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(fs::read(&sb.board).unwrap(), tail);
+}
