@@ -4346,3 +4346,68 @@ fn olp_board_harvest_ignores_triggers_inside_event_sources() {
         "{carded:?}"
     );
 }
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: scripts/olp-board-append.sh, called with the relative name `-x`.
+/// - Production path: the opted-in and hard-link checks, which hand the board path to find and grep.
+/// - External edges faked: temporary boards named `-x` in two directories only.
+/// - What this proves: a board name that looks like an option is still a path, so neither the hard-link refusal nor the event-line refusal can be skipped by naming the board `-x`.
+/// - What this intentionally does not exercise: absolute paths, covered by the other shell tests.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_legacy_shell_treats_option_like_names_as_paths
+#[test]
+fn olp_board_legacy_shell_treats_option_like_names_as_paths() {
+    let sb = Sandbox::new("option-like-name");
+    let one = sb.root.join("one");
+    let two = sb.root.join("two");
+    fs::create_dir_all(&one).unwrap();
+    fs::create_dir_all(&two).unwrap();
+    fs::write(one.join("-x"), b"# Board\n\n<!-- olp-board/v1 -->\n").unwrap();
+    fs::write(one.join("-x.lock"), b"").unwrap();
+    fs::hard_link(one.join("-x"), two.join("-x")).unwrap();
+    fs::write(two.join("-x.lock"), b"").unwrap();
+    let shell = |dir: &PathBuf, body: &[u8]| {
+        let mut child = Command::new("bash")
+            .arg(script("olp-board-append.sh"))
+            .arg("-x")
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(body).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let refused = |output: Output, needle: &str| {
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(needle),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let before = fs::read(one.join("-x")).unwrap();
+    for dir in [&one, &two] {
+        refused(shell(dir, b"note through a second name\n"), "hard link");
+        assert_eq!(fs::read(one.join("-x")).unwrap(), before);
+    }
+
+    fs::remove_file(two.join("-x")).unwrap();
+    refused(
+        shell(&one, b"> OLP-EVENT {forged}\n"),
+        "opted in to olp-board/v1",
+    );
+    assert_eq!(fs::read(one.join("-x")).unwrap(), before);
+    assert!(shell(&one, b"Plain note.\n").status.success());
+    assert!(
+        fs::read(one.join("-x"))
+            .unwrap()
+            .ends_with(b"Plain note.\n")
+    );
+}

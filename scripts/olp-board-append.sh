@@ -16,6 +16,9 @@
 # 能感知你的写入。
 set -euo pipefail
 BOARD="${1:?用法: olp-board-append.sh <board.md> (正文从 stdin 喂)}"
+# find and grep below would read a relative name starting with `-`, `!` or `(`
+# as an option or an expression and silently skip every check; keep it a path.
+case $BOARD in /*) ;; *) BOARD="./$BOARD" ;; esac
 LOCK="${BOARD}.lock"
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
