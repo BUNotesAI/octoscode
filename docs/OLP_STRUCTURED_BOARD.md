@@ -73,8 +73,9 @@ UTC `ts=` 行，随后 fsync 并回读固定区间。读者（state、inbox、se
 
 旧 `olp-board-append.sh` 在 legacy 板上行为不变；板里已有事件行或
 `<!-- olp-board/v1 -->` 标记时，它拒绝以 `> OLP-EVENT ` 开头的正文行和独立的 `ts=` 时间行（与 `olp-board-append.py`
-同一判定：时间戳后只允许一个可选的 CR），
-其余文字照常追加。
+同一判定：时间戳后只允许一个可选的 CR）；它也和 `olp-board-append.py` 一样拒绝
+不以 LF 结尾的正文，并在板以半行结尾时拒绝追加（先按上文 void 该半行），两次追加
+拼不成同一行。其余文字照常追加。
 
 逻辑 `actor` 不是 OS 身份认证，也不校验 `outer-duty` 的 R7 lease。调用者仍须按
 OLP 的权限与主审纪律选择 actor。
@@ -212,7 +213,8 @@ runtime 尚未 receive 的 item 始终计入。基线要取自某次 inbox/senti
 
 sentinel 启动时先补读账本，再从启动字节基线之后扫描文字。输出前缀分别是
 `LEDGER-SIGNAL`（启动补读或后续账本变化）、`BOARD-SIGNAL`（文字只负责唤醒）、
-`DRIFT`、`ERROR` 和 `TIMEOUT`。普通等待超时及尾部未完成行持续到期限都会在
+`DRIFT`、`ERROR` 和 `TIMEOUT`。文字按字节匹配 token，旧 shell 写入的非 UTF-8
+行照常命中（展示时替换无法解码的字节）。普通等待超时及尾部未完成行持续到期限都会在
 stdout 输出 `TIMEOUT: {...}` 并退出 3；监视方必须同时检查前缀和退出码。正信号的完成判定始终以账本为准；原有
 `events.jsonl` 的 `goal_transition blocked`/`escalation` 负信号哨继续挂载。
 sentinel 不会自动开 turn、派单或执行，也不替代
@@ -252,7 +254,8 @@ sentinel 不会自动开 turn、派单或执行，也不替代
 identity。因此板旁的 `.lock` 和相邻安装的事件工具是结构化采集的前提：板里已有事件行
 而二者缺一时，harvest 明确非零失败并指明缺什么，不会静默改用旧扫描器（那样同一条 ACK
 会换一个 identity 再出一张卡）。不含事件行的 legacy 板不受影响。旧 shell 追加器不校验
-UTF-8，含其他字节的旧触发行在结构化路径上照常出卡；采集任何失败都以 `error:` 行退出并
+UTF-8，含其他字节的旧触发行在结构化路径上照常出卡；bash 读行会丢掉 NUL 字节，结构化
+路径因此按行号在快照上定位旧扫描器的每一行，NUL 不会让同一条 ACK 出两张卡；采集任何失败都以 `error:` 行退出并
 清理自己的临时目录。
 
 收口时从 `state` 输出取得该条 DRIFT（或 `partial_tail`）的精确 `offset`、

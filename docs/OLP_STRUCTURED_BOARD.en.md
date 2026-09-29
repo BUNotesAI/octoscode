@@ -70,8 +70,10 @@ TOOLS="$HOME/.octos/outer"
 - The legacy `olp-board-append.sh` is unchanged on legacy boards. Once the
   board has an event line or the opt-in marker, it refuses body lines that
   start with `> OLP-EVENT ` and standalone `ts=` lines (judged exactly as
-  `olp-board-append.py` does: only an optional CR may follow the timestamp);
-  other text is appended
+  `olp-board-append.py` does: only an optional CR may follow the timestamp).
+  Like `olp-board-append.py`, it also refuses a body that does not end with LF
+  and any append to a board that ends with a partial line (void that line
+  first), so two appends can never splice one line. Other text is appended
   as before.
 - `actor` is a logical name, not an OS identity, and nothing here enforces the
   R7 outer-duty lease.
@@ -156,7 +158,9 @@ starting sentinel catches up on everything open.
 
 Sentinel prefixes are `LEDGER-SIGNAL` (ledger change), `BOARD-SIGNAL` (text
 wake-up only), `DRIFT`, `ERROR` and `TIMEOUT`; timeouts print `TIMEOUT: {...}`
-and exit 3, so check both prefix and exit code. The ledger, not the text,
+and exit 3, so check both prefix and exit code. Text is matched on bytes,
+so a line the legacy shell appended with bytes that are not UTF-8 still wakes
+it (undecodable bytes are shown replaced). The ledger, not the text,
 decides completion. Keep the existing `events.jsonl` negative sentry; the
 sentinel never opens a turn, dispatches or executes anything.
 
@@ -192,7 +196,9 @@ non-zero and says which, instead of silently switching to the legacy scanner
 (which would card the same ACK again under another identity). Legacy boards
 without event lines are unaffected. The legacy shell appender does not check
 UTF-8, so a legacy trigger line may carry other bytes; the structured path
-still cards it. Any failed harvest run exits with an `error:` line and removes
+still cards it. bash drops NUL bytes when it reads lines, so the structured
+path places each legacy-scanner row by its line number on the snapshot; a NUL
+on the board never cards one ACK twice. Any failed harvest run exits with an `error:` line and removes
 its temporary directory.
 
 To reconcile, copy the exact `offset`, `length` and `sha256` of the entry (or
