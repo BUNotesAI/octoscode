@@ -13,7 +13,7 @@ tags: [olp, protocol, blackboard, observability]
 
 ## Requirements
 
-[REQ-OLP-BOARD-APPEND] 系统 MUST 只使用预先存在的规范板文件及其独立普通 `.lock` 文件，在一次独占锁持有期间完成 UTF-8 正文校验、offset/prev/id/UTC 时间生成、追加、fsync 和固定区间回读；失败 MUST 报告 `may_have_appended`，MUST NOT 自动重建锁、截断板或盲目重试。板以无 LF 的半行结尾时，普通写入 MUST 拒绝，只有以该半行为目标的 `void` MAY 先补 LF 再追加。符号链接形式的板路径，以及有多个硬链接（`st_nlink` 大于 1）的板，MUST 被拒绝：每个路径各锁自己的 `<路径>.lock`，同一块板会分裂成两个锁域。独立 `ts=` 时间行（行尾只允许可选 CR）MUST 被拒绝，围栏内的示例也不例外，示例须缩进或改写。
+[REQ-OLP-BOARD-APPEND] 系统 MUST 只使用预先存在的规范板文件及其独立普通 `.lock` 文件，在一次独占锁持有期间完成 UTF-8 正文校验、offset/prev/id/UTC 时间生成、追加、fsync 和固定区间回读；失败 MUST 报告 `may_have_appended`，MUST NOT 自动重建锁、截断板或盲目重试。板以无 LF 的半行结尾时，普通写入 MUST 拒绝，只有以该半行为目标的 `void` MAY 先补 LF 再追加。符号链接形式的板路径，以及有多个硬链接（`st_nlink` 大于 1）的板，MUST 被拒绝：每个路径各锁自己的 `<路径>.lock`，同一块板会分裂成两个锁域。链接数 MUST 在解析路径时检查，并在取得锁、打开板之后对打开的板再检查一次；锁由路径派生，无法抵御与写入并发的 link/unlink，这是非对抗文件系统的前提。独立 `ts=` 时间行（行尾只允许可选 CR）MUST 被拒绝，围栏内的示例也不例外，示例须缩进或改写。
 
 [REQ-OLP-BOARD-SCHEMA] 结构化事件 MUST 使用 `schema="olp-board/v1"` 与 item、receive、ack、review、withdraw、resolve、void 七种事件，事件行固定以 `> OLP-EVENT ` 开头，共用严格 canonical JSON、32 位十六进制 id、prev 链、actor、UTC ts 和同板 source；item 与 ack MUST 含必需但可空的 `recovery`，void MUST 含 `target` 字节证据；未知字段、重复 JSON key、非有限数、bool 冒充整数、坏链、坏证据和语义不匹配正文 MUST NOT 进入账本。行 MUST 只以 LF 切分，裸 CR 是普通内容。事件 source MUST 从行首开始（仅 void 收口半行时可以补上的 LF 开头），且 MUST NOT 与已配对或已被 recovery、void 消费的字节重叠，否则该事件行是 `malformed_event`。
 
@@ -29,7 +29,7 @@ tags: [olp, protocol, blackboard, observability]
 
 [REQ-OLP-BOARD-SENTINEL] sentinel MUST 启动即补读账本（给出 `--since-head` 时只补读该事件之后的可处理状态），只扫描启动基线后的文字，并用固定 `LEDGER-SIGNAL`/`BOARD-SIGNAL`/`DRIFT`/`ERROR`/`TIMEOUT` 前缀区分信号；普通等待和尾部未完成行两条超时路径 MUST 输出 `TIMEOUT` JSON 行并退出 3；板缩短或替换 MUST 输出 ERROR。基线后的文字 MUST 按字节匹配 token，含非 UTF-8 字节的行 MUST 照常命中（展示时替换无法解码的字节），MUST NOT 使 sentinel 失败。
 
-[REQ-OLP-BOARD-HARVEST] 进化采集 MUST 只在板含 `> OLP-EVENT ` 行且回放出至少一条有效事件时走结构化路径；不含此类行的板（包括带旧 shell `.lock` 的 legacy 板）MUST 不调用 Python、不取板锁，输出与 legacy 扫描器逐字节一致；含此类行但无有效事件的板 MUST 回落到 legacy 扫描器；含此类行而事件工具或板 `.lock` 缺失时 MUST 明确非零失败，MUST NOT 静默回落 legacy。结构化路径 MUST 在共享锁下只读取一次板字节，回放、legacy 扫描与结构化扫描都基于这一快照，快照之后的追加留给下一轮；同一 ACK 行在连续各轮 MUST 得到同一个 identity。结构化路径 MUST 按字节处理候选行，旧 shell 写入的非 UTF-8 旧触发行 MUST 照常出卡；legacy 候选行 MUST 按行号换算出快照中的真实字节 offset 再与回放区间比对（bash `read` 会丢弃 NUL 字节，其累加的 offset 不可靠），带 recovery 的 identity MUST 与 legacy 扫描器一样不计 NUL，板上的 NUL 字节 MUST NOT 让同一 ACK 出两张卡；采集任何失败 MUST 以 `error:` 行非零退出，且 MUST 清理自己的临时目录。结构化路径 MUST 复用事件回放器和 item ID 取得展示编号，使乱序 ACK 归属原 item，行字段中的 `|` MUST 被转义，板的真实路径含 `|` 或换行（行协议无法承载）时结构化采集 MUST 只以一条 `error:` 行非零退出，带 recovery 的 ACK MUST 沿用被恢复原行的 legacy identity；MUST 保留 legacy ACK 与签名 override/R2 触发，只抑制围栏区间、已 void 区间、已配对结构化 ACK 及其 recovery 原 ACK 的重复卡。opt-in 后未闭合围栏 MUST 令采集明确非零失败且 MUST NOT 推进采集游标；legacy 采集函数 MUST 保持原行为。
+[REQ-OLP-BOARD-HARVEST] 进化采集 MUST 只在板含 `> OLP-EVENT ` 行且回放出至少一条有效事件时走结构化路径；不含此类行的板（包括带旧 shell `.lock` 的 legacy 板）MUST 不调用 Python、不取板锁，输出与 legacy 扫描器逐字节一致；含此类行但无有效事件的板 MUST 回落到 legacy 扫描器；含此类行而事件工具或板 `.lock` 缺失时 MUST 明确非零失败，MUST NOT 静默回落 legacy。结构化路径 MUST 在共享锁下只读取一次板字节，回放、legacy 扫描与结构化扫描都基于这一快照，快照之后的追加留给下一轮；同一 ACK 行在连续各轮 MUST 得到同一个 identity。结构化路径 MUST 按字节处理候选行，旧 shell 写入的非 UTF-8 旧触发行 MUST 照常出卡；legacy 候选行 MUST 按行号换算出快照中的真实字节 offset 再与回放区间比对（bash `read` 会丢弃 NUL 字节，其累加的 offset 不可靠），带 recovery 的 identity MUST 与 legacy 扫描器一样不计 NUL，板上的 NUL 字节 MUST NOT 让同一 ACK 出两张卡；采集任何失败 MUST 以 `error:` 行非零退出，且 MUST 清理自己的临时目录。结构化路径 MUST 复用事件回放器和 item ID 取得展示编号，使乱序 ACK 归属原 item，行字段中的 `|` MUST 被转义，给定的或解析后的板路径含 `|` 或换行（行协议无法承载）时结构化采集 MUST 只以一个物理行的 `error:` 非零退出（路径转义后显示），带 recovery 的 ACK MUST 沿用被恢复原行的 legacy identity；MUST 保留 legacy ACK 与签名 override/R2 触发，只抑制围栏区间、已 void 区间、任何正式事件的 source（事件自己的正文，不论其中引用了什么）以及 ACK recovery 原文的重复卡。opt-in 后未闭合围栏 MUST 令采集明确非零失败且 MUST NOT 推进采集游标；legacy 采集函数 MUST 保持原行为。
 
 [REQ-OLP-BOARD-COMPAT] 旧 shell watcher MUST 保持运行行为不变；旧 shell 追加器对 legacy 板 MUST 保持不变，只在板已含事件行或 `<!-- olp-board/v1 -->` 标记时拒绝以 `> OLP-EVENT ` 开头的正文行与独立 `ts=` 时间行（判定与 Python 追加器一致，行尾只允许可选 CR），也拒绝不以 LF 结尾的正文，并在板以无 LF 的半行结尾时拒绝追加（与 Python 追加器一致，分两次追加拼不出事件行），并在这类板经符号链接路径调用或有多个硬链接时拒绝，MUST NOT 在链接旁另建锁。四个 Python CLI MUST 相邻部署、仅依赖标准库并与旧 shell 共用同一锁文件。
 
@@ -185,14 +185,24 @@ Scenario: NUL 拆开关键字的手写 ACK 在 state 与 harvest 中结论一致
   Then state 把它报为 unpaired_ack 并阻止派发，采集恰出一张卡；recovery 被接受，之后 DRIFT 清空且仍只有同一 identity 的一张卡
 
 Scenario: 有多个硬链接的板被拒绝
-  Given 一块已 opt-in 的板和指向它的硬链接
+  Given 一块已 opt-in 的板和指向它的硬链接，其中一个名字只是一个换行
   When 通过任一路径运行 item、state、普通追加与旧 shell 追加，再删除硬链接后重试
   Then 有硬链接时都退出 2 且板字节不变，删除后照常工作
 
+Scenario: 等锁期间出现的硬链接在取得锁后被发现
+  Given 写者与读者已通过路径检查，在等锁期间板多出一个名字
+  When 它们取得锁
+  Then 读、普通追加、事件写入与旧 shell 追加都拒绝，板字节不变
+
+Scenario: 正式事件正文里引用的触发行不出卡
+  Given 一条正式 item 的正文里引用了 `ACK(blocked): ...` 与被 NUL 拆开的同类行
+  When 运行 state 与真实进化采集脚本
+  Then state 干净且可派发，采集不出卡；正文之外的同类手写行照常出卡并报 DRIFT
+
 Scenario: 板路径含行分隔符时结构化采集明确失败
-  Given 真实路径含 `|` 的目录下一块有 blocked ACK 的结构化板
-  When 运行真实进化采集脚本
-  Then 非零退出，stderr 只有一条 error 行且没有 traceback，不输出卡片
+  Given 路径含 `|`、中间含换行或以换行结尾的三块有 blocked ACK 的结构化板
+  When 分别运行真实进化采集脚本
+  Then 都非零退出，stderr 只有一个物理行的 error 且没有 traceback，不输出卡片
 
 Scenario: 写入口的参数错误只得到一个机器错误
   Given 两个写入口
@@ -257,6 +267,7 @@ Scenario: legacy 与无 Python 降级保持可用
 - PR #668 维护者复审（2026-09-28 17:14Z，基于 `4c5e0ef`）：非 UTF-8 旧触发行让结构化采集崩溃、不出卡并遗留临时目录；嵌套过深的 JSON 让事件 CLI 输出原始 traceback 而不是机器 JSON。
 - 作者自查（2026-09-29，基于 `58d2277`）：以孤立代理项转义作重复键的事件行让 state、inbox、sentinel 与采集整体失败；sentinel 遇到旧 shell 写入的非 UTF-8 行即报 ERROR 退出，重挂后该行的 token 永久漏报；bash `read` 丢弃 NUL 使 legacy offset 偏移，同一 ACK 出两张卡；旧 shell 可在已 opt-in 板的半行上续写，分两次拼出事件行。
 - 异构审查（codex，2026-09-29，基于 `a1e48c7`）：NUL 拆开 ACK 关键字时 state 报板干净而 harvest 出 blocked 卡；硬链接让同一块板分裂成两个锁域；板路径含 `|` 时采集行协议被击穿并输出 traceback；写入口的参数解析错误输出 usage 文本而不是机器 JSON。
+- 异构复审（codex，2026-09-29，基于 `9c09017`）：正式 item 正文里引用的 ACK 被 harvest 当作手写触发出卡；旧 shell 的硬链接检查可被换行文件名绕过，且各入口只在取锁前检查；换行路径的错误信息破成两行，结尾换行被命令替换吞掉后绕过检查。EVENTS/MCP 路径含 `|` 时字段错位是本 PR 之前就有的 legacy 行为，不在本需求范围。
 
 ## Open Questions
 
