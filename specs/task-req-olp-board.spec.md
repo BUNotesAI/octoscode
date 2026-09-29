@@ -11,7 +11,7 @@ estimate: 3d
 
 ## 已定决策
 
-- 四个相邻标准库 Python CLI 分别负责字节追加、事件回放、待办查询和综合哨；旧 watcher 只增加英文指引；旧追加器只在已 opt-in（含事件行或 `<!-- olp-board/v1 -->` 标记）的板上拒绝 `> OLP-EVENT ` 与独立 `ts=` 正文行、不以 LF 结尾的正文以及在板尾半行上的续写（与 Python 追加器一致，分两次追加拼不出事件行），也拒绝经符号链接路径调用，legacy 板行为不变；独立 `ts=` 行的判定两边一致（行尾只允许可选 CR），围栏内也拒绝，示例须缩进或改写。
+- 四个相邻标准库 Python CLI 分别负责字节追加、事件回放、待办查询和综合哨；旧 watcher 只增加英文指引；旧追加器只在已 opt-in（含事件行或 `<!-- olp-board/v1 -->` 标记）的板上拒绝 `> OLP-EVENT ` 与独立 `ts=` 正文行、不以 LF 结尾的正文以及在板尾半行上的续写（与 Python 追加器一致，分两次追加拼不出事件行），也拒绝经符号链接路径调用或有多个硬链接的板，legacy 板行为不变；独立 `ts=` 行的判定两边一致（行尾只允许可选 CR），围栏内也拒绝，示例须缩进或改写。
 - 事件行固定以 `> OLP-EVENT ` 开头，共用 `schema/id/prev/type/actor/ts/source`；类型为 item、receive、ack、review、withdraw、resolve、void；item/ack 另有必需但可空的 `recovery`，void 带 `target` 字节证据。
 - 回放逐行容错：任一事件行的 JSON、canonical、相邻 source、摘要、ts 边界、recovery/void 目标或生命周期校验失败，都成为 `malformed_event` DRIFT（证据为该行不含 LF 的字节），事件不入账，后续写者从最后有效 head 续链；state 本身不因坏行失败。DRIFT 原因总能作为 UTF-8 JSON 输出（重复键以 JSON 转义形式报出），单条事件行不会让 state、snapshot、inbox、sentinel 或 harvest 失败。
 - 行只以 LF 切分；追加守卫、回放、recovery 行边界共用这一规则，裸 CR 是普通内容；规范 item/ACK 行允许以 CRLF 结尾。
@@ -19,12 +19,12 @@ estimate: 3d
 - 读者以共享锁复制字节后在锁外回放；已配对、已消费区间用有序区间索引查询，回放近似线性。
 - item 只有一次 receive、一次终态 ack、一次 review；return 或 blocked 恢复另开 item，wontdo 不得 return；作者可 withdraw 未 receive 的 item，可 resolve 已 escalate 的 review 并可指向另一个既有后续 item。
 - 状态固定分为 unreceived、received_pending、unreviewed_ack、escalated；withdraw 与 resolve 使条目离开集合；runtime inbox 按 actor 显式返回前两类并保持账本出现顺序，但始终不授权执行；`--since-head` 只把触发事件位于基线之后的 received_pending、unreviewed_ack、escalated 计入 messages，runtime 尚未 receive 的 item 始终计入；基线应取自调用方已处理或有意暂留全部 messages 的那次输出的 head。
-- opt-in 前历史不追溯；opt-in 后未配对规范 item（`unpaired_item`）、符合 v1 语法（前导空白、全角冒号）的 ACK（`unpaired_ack`）与引用/列表/标题/强调/行内/旧式疑似 ACK（`suspected_ack`）标 DRIFT 并阻止自动调度；已配对 source 与已闭合围栏示例不触发。未闭合围栏以 opener 字节证据阻塞，只有同种且不短于 opener 的闭合行恢复写入。末尾无 LF 的半行（无论内容）以 `partial_tail` 暴露，未进围栏的半截事件行同时是 malformed_event。
-- 收口只追加：item/ack 的 recovery 精确消费一条未配对规范行或含 `ACK(outcome)` 的疑似 ACK，语义须匹配；void 精确隔离一条 malformed_event、未配对行、疑似 ACK 或 partial_tail；每段原文至多消费一次，证据分别进入 recovery_evidence 与 quarantine_evidence。actor 是逻辑名，任何 actor 都可写 void，由外环人工核对是约定而非强制。
+- opt-in 前历史不追溯；opt-in 后未配对规范 item（`unpaired_item`）、符合 v1 语法（前导空白、全角冒号）的 ACK（`unpaired_ack`）与引用/列表/标题/强调/行内/旧式疑似 ACK（`suspected_ack`）标 DRIFT 并阻止自动调度；已配对 source 与已闭合围栏示例不触发。判定规范行与疑似 ACK 前先去掉 NUL（legacy 扫描器用 bash `read`，看不到 NUL），NUL 拆开关键字的手写 ACK 同样阻断，state 与 harvest 对同一行结论一致。未闭合围栏以 opener 字节证据阻塞，只有同种且不短于 opener 的闭合行恢复写入。末尾无 LF 的半行（无论内容）以 `partial_tail` 暴露，未进围栏的半截事件行同时是 malformed_event。
+- 收口只追加：item/ack 的 recovery 精确消费一条未配对规范行或含 `ACK(outcome)` 的疑似 ACK，语义须匹配（同样不计 NUL）；void 精确隔离一条 malformed_event、未配对行、疑似 ACK 或 partial_tail；每段原文至多消费一次，证据分别进入 recovery_evidence 与 quarantine_evidence。actor 是逻辑名，任何 actor 都可写 void，由外环人工核对是约定而非强制。
 - sentinel 的固定输出前缀为 LEDGER-SIGNAL、BOARD-SIGNAL、DRIFT、ERROR、TIMEOUT；普通等待与尾部未完成行超时都输出 TIMEOUT JSON 行并退出 3。基线后的文字按字节匹配 token，含非 UTF-8 字节的行照常命中，展示时替换无法解码的字节。
-- harvest 先无锁检查板中是否有 `> OLP-EVENT ` 行，没有就直接走原 legacy 扫描器，不调用 Python、不取板锁；有此类行时在共享锁下回放，回放出有效事件才走结构化路径，否则仍走 legacy 扫描器；有此类行而事件工具或板锁缺失时明确失败，不静默走 legacy（`.lock` 是结构化采集的前提）；结构化路径经 `snapshot` 在共享锁下只读一次字节，回放、legacy 扫描与结构化扫描都用这份快照，快照之后的追加留给下一轮，同一 ACK 跨轮只有一个 identity；候选行按字节合并，旧 shell 写入的非 UTF-8 旧触发行照常出卡，legacy 候选行按行号换算出快照中的真实 offset 后再与回放区间比对（bash `read` 丢弃 NUL，它累加的 offset 不可靠），带 recovery 的 identity 与 legacy 扫描器一样不计 NUL，采集在任何失败路径上都以 `error:` 行退出并清理临时目录；取得 ack.item、item.number（`|` 转义）与围栏/隔离区间；带 recovery 的 ACK 沿用被恢复原行的 legacy identity，使恢复前已落的卡不重复；保留 legacy ACK 与签名 override/R2，抑制围栏示例、已隔离行、配对 ACK 及其 recovery 原文的重复卡；临时文件用 mktemp。
-- 板路径若是符号链接则拒绝，避免 Python 工具锁 `<目标>.lock` 而旧 shell 锁 `<链接>.lock`；旧 shell 在已 opt-in 的板上同样拒绝，且不在链接旁建锁。
-- 各 CLI 把嵌套过深的 JSON 引发的递归错误与其他输入错误一样，报成一个机器 JSON 并退出 2。
+- harvest 先无锁检查板中是否有 `> OLP-EVENT ` 行，没有就直接走原 legacy 扫描器，不调用 Python、不取板锁；有此类行时在共享锁下回放，回放出有效事件才走结构化路径，否则仍走 legacy 扫描器；有此类行而事件工具或板锁缺失时明确失败，不静默走 legacy（`.lock` 是结构化采集的前提）；结构化路径经 `snapshot` 在共享锁下只读一次字节，回放、legacy 扫描与结构化扫描都用这份快照，快照之后的追加留给下一轮，同一 ACK 跨轮只有一个 identity；候选行按字节合并，旧 shell 写入的非 UTF-8 旧触发行照常出卡，legacy 候选行按行号换算出快照中的真实 offset 后再与回放区间比对（bash `read` 丢弃 NUL，它累加的 offset 不可靠），带 recovery 的 identity 与 legacy 扫描器一样不计 NUL，采集在任何失败路径上都以 `error:` 行退出并清理临时目录；取得 ack.item、item.number（`|` 转义）与围栏/隔离区间；板的真实路径含 `|` 或换行时行协议无法承载，结构化采集只以一条 `error:` 行退出；带 recovery 的 ACK 沿用被恢复原行的 legacy identity，使恢复前已落的卡不重复；保留 legacy ACK 与签名 override/R2，抑制围栏示例、已隔离行、配对 ACK 及其 recovery 原文的重复卡；临时文件用 mktemp。
+- 板路径若是符号链接则拒绝，避免 Python 工具锁 `<目标>.lock` 而旧 shell 锁 `<链接>.lock`；板有多个硬链接（`st_nlink` 大于 1）时同样拒绝，否则每个路径各锁自己的 `.lock`；旧 shell 在已 opt-in 的板上同样拒绝，且不在链接旁建锁。
+- 各 CLI 把嵌套过深的 JSON 引发的递归错误与其他输入错误一样，报成一个机器 JSON 并退出 2；两个写入口的命令行参数解析错误也是写前失败，同样只输出一个 `may_have_appended=false` 的机器 JSON。
 - 依赖外部命令的 init 场景在 PATH 前放 `octoscode`/`octos` 空桩，测试结果不取决于开发机或 CI 是否全局安装这两个命令。
 - init 默认保持 legacy；`OLP_BOARD_MODE=structured` 只为新文件生成 receive→执行→ack 模板、带 opt-in 标记且无裸 ACK 占位的新板和独立普通锁，并把锁加入 `.gitignore`；按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具相邻安装且不覆盖，既有项目仅提示迁移，无 Python 时保留旧 shell 能力。
 - 所有场景绑定 `tests/olp_board_protocol.rs` 中直接调用生产 CLI 的 Rust 集成测试，不用单一 Python suite wrapper 代替逐场景证据。
@@ -338,6 +338,43 @@ estimate: 3d
   假设 一块 legacy 板和一块已有事件的板
   当 旧 shell 追加不以 LF 结尾的正文、在以半行结尾的板上追加,并分两次追加 `> OLP-` 与 `EVENT {...}`
   那么 legacy 板照旧写入;已 opt-in 的板对前两种退出 2 且字节不变,分两次追加拼不出事件行
+
+场景: NUL 拆开关键字的手写 ACK 在 state 与 harvest 中结论一致(critical)
+  标签: critical
+  测试: olp_board_replay_and_harvest_agree_on_nul_split_ack_lines
+  Level: integration
+  Test Double: temporary boards only; the harvest script and event tool are not replaced
+  Targets: olp-board-event.py normative classification and recovery matching, olp-evo-harvest.sh legacy scanner
+  假设 已 opt-in 的板上一条经旧 shell 追加的 `A<NUL>CK(blocked): ...` 行
+  当 运行 state 与真实 harvest dry-run,再以正式 ACK recovery 该行后各运行一次
+  那么 state 把它报为 unpaired_ack 并阻止派发,harvest 恰出一张卡;recovery 被接受,之后 DRIFT 清空,harvest 仍只有同一 identity 的一张卡
+
+场景: 有多个硬链接的板被拒绝
+  测试: olp_board_tools_refuse_hard_linked_boards
+  Level: integration
+  Test Double: temporary boards and a hard link only
+  Targets: olp-board-append.py board path check, olp-board-append.sh opted-in guard
+  假设 一块已 opt-in 的板和指向它的硬链接(各有 `.lock`)
+  当 通过任一路径运行 item、state、普通追加与旧 shell 追加,再删除硬链接后重试
+  那么 有硬链接时都退出 2 且板字节不变,旧 shell 不在硬链接旁建锁;删除后照常工作
+
+场景: 板路径含行分隔符时结构化采集明确失败
+  测试: olp_board_harvest_refuses_board_paths_with_row_separators
+  Level: integration
+  Test Double: temporary boards in a directory whose name contains `|`
+  Targets: olp-evo-harvest.sh structured path
+  假设 真实路径含 `|` 的目录下一块有 blocked ACK 的结构化板
+  当 运行真实 harvest dry-run
+  那么 非零退出,stderr 只有一条 error 行且没有 traceback,stdout 不输出卡片
+
+场景: 写入口的参数错误只得到一个机器错误
+  测试: olp_board_write_clis_report_argument_errors_as_one_machine_json
+  Level: integration
+  Test Double: temporary boards only
+  Targets: olp-board-event.py and olp-board-append.py argument parsing
+  假设 两个写入口
+  当 传入非法数值、非法选项值、缺少必需参数或未知子命令
+  那么 每次都退出 2,stderr 恰为一个 may_have_appended=false 的 JSON 对象,板字节不变
 
 场景: 采集只读一次快照
   测试: olp_board_harvest_reads_one_snapshot_per_run
