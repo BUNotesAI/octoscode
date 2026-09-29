@@ -47,9 +47,11 @@ TOOLS="$HOME/.octos/outer"
 
 - The board and `<board>.lock` must already exist as regular files. A board
   path that is a symlink is refused: the legacy shell locks `<link>.lock`, so
-  following the link would split the lock domain. The legacy
-  `olp-board-append.sh` also refuses a symlinked path to an opted-in board and
-  never creates `<link>.lock` for it.
+  following the link would split the lock domain. A board with more than one
+  hard link is refused for the same reason: each name locks its own
+  `<name>.lock`. The legacy `olp-board-append.sh` also refuses a symlinked path
+  to an opted-in board, or an opted-in board with more than one hard link, and
+  never creates a lock beside the extra name.
 - Writers hold the lock exclusively while they append the readable text, the
   `> OLP-EVENT <canonical-json>` line and a UTC `ts=` line, then fsync and read
   the range back. Readers (`state`, inbox, sentinel, `verify`) copy the bytes
@@ -58,7 +60,9 @@ TOOLS="$HOME/.octos/outer"
   bypass the tools, and I/O failures, can still leave partial records; these
   surface as DRIFT (below) and never make `state` fail.
 - When an error reports `may_have_appended=true`, inspect `state` and the bytes
-  first. Never blindly retry, truncate or "roll back" the board.
+  first. Never blindly retry, truncate or "roll back" the board. Argument errors
+  of the two write entry points also print one machine JSON, with
+  `may_have_appended=false`.
 - If the board ends with a line that has no LF, every ordinary write is refused
   and `state` reports that line as `partial_tail` (offset/length/sha256),
   whatever it contains; an unfenced partial event line is also a
@@ -184,6 +188,9 @@ lines are flagged anywhere; voiding one on a board without any valid event
 makes that void the first event, which opts the board in. **Put examples inside closed code
 fences**: a quoted ACK is treated as a suspected hand-written ACK, because lanes
 really do write `> ACK(...)` and `### ACK` variants and those must not be missed.
+Normative lines and suspected ACKs are judged without NUL bytes, as the
+harvest's legacy scanner reads them (bash drops NUL), so a NUL splitting the
+keyword cannot hide a hand-written ACK.
 
 Evolution harvest (`olp-evo-harvest.sh`) takes the structured path on a board
 with event lines. It reads the board once, under the shared lock, through
@@ -198,7 +205,10 @@ without event lines are unaffected. The legacy shell appender does not check
 UTF-8, so a legacy trigger line may carry other bytes; the structured path
 still cards it. bash drops NUL bytes when it reads lines, so the structured
 path places each legacy-scanner row by its line number on the snapshot; a NUL
-on the board never cards one ACK twice. Any failed harvest run exits with an `error:` line and removes
+on the board never cards one ACK twice. Candidate rows are `|`-separated and
+identities embed the board path, so a board whose real path contains `|` or a
+newline makes the structured harvest fail with one `error:` line. Any failed
+harvest run exits with an `error:` line and removes
 its temporary directory.
 
 To reconcile, copy the exact `offset`, `length` and `sha256` of the entry (or
@@ -235,8 +245,9 @@ digest, and start a new board, lock and chain only when all four queues are
 empty and no DRIFT is open (`withdraw`, `resolve` and `void` make that
 reachable). Keep the old board, receipts and recovery/quarantine evidence.
 
-- Only cooperating writers on the canonical path and lock are covered; hard
-  links and other aliases can still split the legacy lock domain.
+- Only cooperating writers on the canonical path and lock are covered;
+  symlinked and hard-linked boards are refused, but a writer that bypasses the
+  tools and its lock is not constrained.
 - No authentication and no R7 lease enforcement.
 - `received_pending` is reconciliation evidence, not a re-execution queue.
 - Every write replays the board twice under the exclusive lock (linear time).
