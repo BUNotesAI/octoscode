@@ -205,9 +205,11 @@ without event lines are unaffected. The legacy shell appender does not check
 UTF-8, so a legacy trigger line may carry other bytes; the structured path
 still cards it. bash drops NUL bytes when it reads lines, so the structured
 path places each legacy-scanner row by its line number on the snapshot; a NUL
-on the board never cards one ACK twice. Candidate rows are `|`-separated and
-identities embed the board path, so a board whose real path contains `|` or a
-newline makes the structured harvest fail with one `error:` line. Any failed
+on the board never cards one ACK twice. A trigger quoted inside any formal
+event's source is that event's own text, as replay treats it, and is not
+carded. Candidate rows are `|`-separated and identities embed the board path,
+so a board whose given or resolved path contains `|` or a newline makes the
+structured harvest fail with one `error:` line. Any failed
 harvest run exits with an `error:` line and removes
 its temporary directory.
 
@@ -246,8 +248,11 @@ empty and no DRIFT is open (`withdraw`, `resolve` and `void` make that
 reachable). Keep the old board, receipts and recovery/quarantine evidence.
 
 - Only cooperating writers on the canonical path and lock are covered;
-  symlinked and hard-linked boards are refused, but a writer that bypasses the
-  tools and its lock is not constrained.
+  symlinked and hard-linked boards are refused (the link count is checked when
+  the path is resolved and again once the lock is held), but a writer that
+  bypasses the tools and its lock is not constrained. Locks derive from paths,
+  so links made and removed while a write runs are outside what they guard;
+  nobody is assumed to manipulate board paths adversarially.
 - No authentication and no R7 lease enforcement.
 - `received_pending` is reconciliation evidence, not a re-execution queue.
 - Every write replays the board twice under the exclusive lock (linear time).
