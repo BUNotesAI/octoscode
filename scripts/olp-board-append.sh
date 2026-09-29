@@ -27,11 +27,16 @@ if [ -L "$BOARD" ] && LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
     echo "error: $BOARD is a symlink to an olp-board/v1 board; use the real path so every tool shares one lock" >&2
     exit 2
 fi
-# Each name of a hard-linked board would lock its own <name>.lock as well.
-if [ -n "$(find "$BOARD" -prune -links +1 2>/dev/null)" ] \
-    && LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
+# Each name of a hard-linked board would lock its own <name>.lock as well. The
+# check prints a fixed mark, never the name, which command substitution could
+# strip (a name may be just a newline).
+has_extra_links() { [ "$(find "$1" -prune -links +1 -exec printf x \; 2>/dev/null)" = x ]; }
+refuse_extra_links() {
     echo "error: $BOARD is an olp-board/v1 board with more than one hard link; keep exactly one link so every tool shares one lock" >&2
     exit 2
+}
+if has_extra_links "$BOARD" && LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
+    refuse_extra_links
 fi
 exec 9>"$LOCK"
 flock -x 9
@@ -41,6 +46,8 @@ flock -x 9
 # ends with an optional CR only, exactly as olp-board-append.py judges it.
 TS_LINE='ts=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'$'\r''?$'
 if LC_ALL=C grep -qE "$OPTED_IN" "$BOARD" 2>/dev/null; then
+    # A second name may have appeared while the lock was awaited.
+    has_extra_links "$BOARD" && refuse_extra_links
     if LC_ALL=C grep -qE "^(> OLP-EVENT |${TS_LINE})" "$TMP"; then
         echo "error: $BOARD opted in to olp-board/v1; record events with olp-board-event.py" >&2
         exit 2

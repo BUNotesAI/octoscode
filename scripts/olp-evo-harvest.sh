@@ -229,8 +229,10 @@ harvest_combined_board() { # realpath
     local rp=$1 work live=$BOARD
     # Candidate rows are `|`-separated lines and identities embed the board
     # path, so a path with `|` or a newline cannot be carried: refuse it plainly.
-    case $rp in
-        *'|'*|*$'\n'*) die "structured harvest cannot card a board whose path contains '|' or a newline: $rp" ;;
+    # Check the given path too, since command substitution drops a trailing
+    # newline from the resolved one, and show it escaped on one line.
+    case "$live$rp" in
+        *'|'*|*$'\n'*) die "structured harvest cannot card a board whose path contains '|' or a newline: $(printf '%q' "$live")" ;;
     esac
     work=$(mktemp -d "${TMPDIR:-/tmp}/olp-evo-board.XXXXXX") || die "cannot create a temporary directory"
     COMBINED_WORK=$work
@@ -277,20 +279,20 @@ position = data.find(b"\n")
 while position >= 0:
     line_starts.append(position + 1)
     position = data.find(b"\n", position + 1)
-represented_acks = []
-for event in state.get("events", []):
-    if event.get("type") == "ack":
-        source = event["source"]
-        represented_acks.append((source["offset"], source["offset"] + source["length"]))
+# Text an event owns (its source) is ledger prose whatever it quotes, as replay
+# treats it; a recovered hand-written ACK is carded once, by its structured row.
+recovered_acks = []
 for evidence in state.get("recovery_evidence", []):
     if evidence.get("type") == "ack":
         source = evidence["source"]
-        represented_acks.append((source["offset"], source["offset"] + source["length"]))
+        recovered_acks.append((source["offset"], source["offset"] + source["length"]))
 
 suppressed = [(entry["offset"], entry["offset"] + entry["length"])
               for entry in state.get("fenced_ranges", [])]
 suppressed += [(entry["source"]["offset"], entry["source"]["offset"] + entry["source"]["length"])
                for entry in state.get("quarantine_evidence", [])]
+suppressed += [(event["source"]["offset"], event["source"]["offset"] + event["source"]["length"])
+               for event in state.get("events", [])]
 
 def covered(point, intervals):
     return any(start <= point < end for start, end in intervals)
@@ -305,7 +307,7 @@ with open(output_path, "wb") as output:
         point = line_starts[int(parts[4]) - 1]
         if covered(point, suppressed):
             continue
-        if parts[0] in (b"ack_blocked", b"ack_wontdo") and covered(point, represented_acks):
+        if parts[0] in (b"ack_blocked", b"ack_wontdo") and covered(point, recovered_acks):
             continue
         parts[5] = str(point).encode("ascii")
         output.write(b"|".join(parts) + b"\n")

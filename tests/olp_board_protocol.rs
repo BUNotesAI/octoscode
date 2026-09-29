@@ -3954,6 +3954,32 @@ fn olp_board_tools_refuse_hard_linked_boards() {
     }
     assert!(!sb.root.join("UNLOCKED.md.lock").exists());
 
+    // The legacy helper counts links as a number: a name that is only a
+    // newline, which command substitution strips from printed text, is caught.
+    let newline_dir = sb.root.join("newline-name");
+    fs::create_dir_all(&newline_dir).unwrap();
+    fs::hard_link(&sb.board, newline_dir.join("\n")).unwrap();
+    fs::write(newline_dir.join("\n.lock"), b"").unwrap();
+    let mut child = Command::new("bash")
+        .arg(script("olp-board-append.sh"))
+        .arg("\n")
+        .current_dir(&newline_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"note\n").unwrap();
+    let refused = child.wait_with_output().unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("hard link"),
+        "stderr={}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(fs::read(&sb.board).unwrap(), before);
+    fs::remove_file(newline_dir.join("\n")).unwrap();
+
     fs::remove_file(&alias).unwrap();
     fs::remove_file(&unlocked).unwrap();
     success_json(python("olp-board-event.py", &item_args, &sb.board));
@@ -3964,84 +3990,90 @@ fn olp_board_tools_refuse_hard_linked_boards() {
 /// - Tier: Real-path regression.
 /// - Production entrypoint: olp-evo-harvest.sh --dry-run.
 /// - Production path: the structured path's guard in front of its `|`-separated candidate rows.
-/// - External edges faked: a temporary board in a directory whose name contains `|`.
-/// - What this proves: a board path the row protocol cannot carry fails with one error line and no traceback, instead of breaking the merge.
+/// - External edges faked: temporary boards whose paths contain `|`, an inner newline or a trailing newline.
+/// - What this proves: a board path the row protocol cannot carry fails with one physical error line and no traceback, instead of breaking the merge; a trailing newline, which command substitution drops from the resolved path, is caught too.
 /// - What this intentionally does not exercise: `|` in item numbers, which are escaped (covered by the pipe test).
 /// - Focused command: cargo test --test olp_board_protocol olp_board_harvest_refuses_board_paths_with_row_separators
 #[test]
 fn olp_board_harvest_refuses_board_paths_with_row_separators() {
     let sb = Sandbox::new("harvest-pipe-path");
-    let dir = sb.root.join("repo|pipe");
-    fs::create_dir_all(&dir).unwrap();
-    let board = dir.join("BOARD.md");
-    fs::write(&board, b"").unwrap();
-    fs::write(dir.join("BOARD.md.lock"), b"").unwrap();
     let body = sb.file("pipe-body.txt", b"Body.\n");
     let why = sb.file("pipe-why.txt", b"dependency unavailable");
-    let event = |args: &[&str]| {
-        success_json(
-            Command::new("python3")
-                .arg("-B")
-                .arg(script("olp-board-event.py"))
-                .args(args)
-                .arg("--board")
-                .arg(&board)
-                .output()
-                .unwrap(),
-        )
-    };
-    let item = event(&[
-        "item",
-        "--actor",
-        "outer",
-        "--number",
-        "8",
-        "--title",
-        "Pipe",
-        "--body-file",
-        body.to_str().unwrap(),
-    ]);
-    let item_id = item["event"].as_str().unwrap();
-    event(&["receive", "--actor", "runtime", "--item", item_id]);
-    event(&[
-        "ack",
-        "--actor",
-        "runtime",
-        "--item",
-        item_id,
-        "--outcome",
-        "blocked",
-        "--r2",
-        "unverified",
-        "--body-file",
-        why.to_str().unwrap(),
-    ]);
-
     let repo_root = sb.root.join("repo");
     fs::create_dir_all(&repo_root).unwrap();
-    let output = Command::new("bash")
-        .arg(script("olp-evo-harvest.sh"))
-        .arg(&repo_root)
-        .arg("--dry-run")
-        .env("OLP_EVO_REVIEW_BOARD", &board)
-        .env("OLP_EVO_MCP_BOARD", sb.root.join("missing-mcp.md"))
-        .env("OLP_EVO_STATE", sb.root.join("harvest-state"))
-        .env("OLP_EVO_BOARD", sb.root.join("EVOLUTION.md"))
-        .env("OLP_BOARD_EVENT_TOOL", script("olp-board-event.py"))
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "stderr={stderr}");
-    let lines: Vec<&str> = stderr
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    assert_eq!(lines.len(), 1, "stderr={stderr}");
-    assert!(
-        lines[0].starts_with("error: ") && lines[0].contains("'|'"),
-        "stderr={stderr}"
-    );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("### EVO-"));
+    for (dir, name) in [
+        ("repo|pipe", "BOARD.md"),
+        ("inner\nline", "BOARD.md"),
+        ("trailing", "BOARD.md\n"),
+    ] {
+        let dir = sb.root.join(dir);
+        fs::create_dir_all(&dir).unwrap();
+        let board = dir.join(name);
+        fs::write(&board, b"").unwrap();
+        fs::write(dir.join(format!("{name}.lock")), b"").unwrap();
+        let event = |args: &[&str]| {
+            success_json(
+                Command::new("python3")
+                    .arg("-B")
+                    .arg(script("olp-board-event.py"))
+                    .args(args)
+                    .arg("--board")
+                    .arg(&board)
+                    .output()
+                    .unwrap(),
+            )
+        };
+        let item = event(&[
+            "item",
+            "--actor",
+            "outer",
+            "--number",
+            "8",
+            "--title",
+            "Pipe",
+            "--body-file",
+            body.to_str().unwrap(),
+        ]);
+        let item_id = item["event"].as_str().unwrap();
+        event(&["receive", "--actor", "runtime", "--item", item_id]);
+        event(&[
+            "ack",
+            "--actor",
+            "runtime",
+            "--item",
+            item_id,
+            "--outcome",
+            "blocked",
+            "--r2",
+            "unverified",
+            "--body-file",
+            why.to_str().unwrap(),
+        ]);
+
+        let output = Command::new("bash")
+            .arg(script("olp-evo-harvest.sh"))
+            .arg(&repo_root)
+            .arg("--dry-run")
+            .env("OLP_EVO_REVIEW_BOARD", &board)
+            .env("OLP_EVO_MCP_BOARD", sb.root.join("missing-mcp.md"))
+            .env("OLP_EVO_STATE", sb.root.join("harvest-state"))
+            .env("OLP_EVO_BOARD", sb.root.join("EVOLUTION.md"))
+            .env("OLP_BOARD_EVENT_TOOL", script("olp-board-event.py"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{board:?} stderr={stderr}");
+        let lines: Vec<&str> = stderr
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(lines.len(), 1, "{board:?} stderr={stderr}");
+        assert!(
+            lines[0].starts_with("error: ") && lines[0].contains("'|'"),
+            "{board:?} stderr={stderr}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("### EVO-"));
+    }
 }
 
 /// Test Path Statement:
@@ -4136,4 +4168,181 @@ fn olp_board_write_clis_report_argument_errors_as_one_machine_json() {
         assert!(error["error"].is_string(), "{tool} {error}");
         assert_eq!(fs::read(&sb.board).unwrap(), before, "{tool} {args:?}");
     }
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: olp-board-append.py read_snapshot/run/append_generated (the paths behind state, append and every event writer) and scripts/olp-board-append.sh.
+/// - Production path: the link-count check on the opened board once the lock is held.
+/// - External edges faked: in the test process only, the production module's lock step and a `flock` shim first on PATH add a second name for the board right as the lock is taken.
+/// - What this proves: a name added while a reader or writer awaited the lock is caught before any byte is read or written, not only one that existed when the path was checked.
+/// - What this intentionally does not exercise: links made and removed concurrently with a write, which path-derived locks cannot guard.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_writers_recheck_links_after_taking_the_lock
+#[test]
+fn olp_board_writers_recheck_links_after_taking_the_lock() {
+    let sb = Sandbox::new("link-after-lock");
+    sb.item("1", "Opted in", "outer", "runtime");
+    let before = fs::read(&sb.board).unwrap();
+    let alias = sb.root.join("LATE.md");
+    let body = sb.file("late-body.txt", b"Body.\n");
+    let probe = sb.file(
+        "late-link-probe.py",
+        br#"
+import contextlib, importlib.util, json, os, sys
+from types import SimpleNamespace
+
+path, board, body, alias = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("append", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+real_locked = module.locked
+
+@contextlib.contextmanager
+def linking(fd, timeout, shared=False):
+    with real_locked(fd, timeout, shared):
+        os.link(board, alias)  # a second name appeared while the lock was awaited
+        try:
+            yield
+        finally:
+            os.remove(alias)
+
+module.locked = linking
+results = {}
+def attempt(name, call):
+    progress = {"may_have_appended": False}
+    try:
+        call(progress)
+        results[name] = {"ok": True, "progress": progress}
+    except Exception as error:
+        results[name] = {"ok": False, "error": str(error), "progress": progress}
+
+attempt("read", lambda progress: module.read_snapshot(board, 1.0))
+attempt("append", lambda progress: module.run(
+    SimpleNamespace(command="append", board=board, body_file=body, lock_timeout=1.0,
+                    max_bytes=None), progress))
+attempt("event", lambda progress: module.append_generated(
+    board, 1.0, lambda data, offset, ts: b"never written\n", progress))
+print(json.dumps(results))
+"#,
+    );
+    let results = success_json(
+        Command::new("python3")
+            .arg("-B")
+            .arg(&probe)
+            .arg(script("olp-board-append.py"))
+            .arg(&sb.board)
+            .arg(&body)
+            .arg(&alias)
+            .output()
+            .unwrap(),
+    );
+    for name in ["read", "append", "event"] {
+        let result = &results[name];
+        assert_eq!(result["ok"], json!(false), "{name} {result}");
+        assert!(
+            result["error"].as_str().unwrap().contains("hard link"),
+            "{name} {result}"
+        );
+        assert_eq!(
+            result["progress"]["may_have_appended"],
+            json!(false),
+            "{name}"
+        );
+    }
+    assert_eq!(fs::read(&sb.board).unwrap(), before);
+
+    let real_flock = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v flock"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let shim_dir = sb.root.join("flock-shim");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let shim = shim_dir.join("flock");
+    fs::write(
+        &shim,
+        b"#!/bin/sh\nln \"$OLP_TEST_BOARD\" \"$OLP_TEST_ALIAS\"\nexec \"$OLP_TEST_REAL_FLOCK\" \"$@\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&shim).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    fs::set_permissions(&shim, permissions).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut child = Command::new("bash")
+        .arg(script("olp-board-append.sh"))
+        .arg(&sb.board)
+        .env("PATH", format!("{}:{path}", shim_dir.display()))
+        .env("OLP_TEST_BOARD", &sb.board)
+        .env("OLP_TEST_ALIAS", &alias)
+        .env("OLP_TEST_REAL_FLOCK", &real_flock)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"note\n").unwrap();
+    let refused = child.wait_with_output().unwrap();
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("hard link"));
+    assert_eq!(fs::read(&sb.board).unwrap(), before);
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: event state CLI and olp-evo-harvest.sh --dry-run, twice.
+/// - Production path: the candidate merge suppresses legacy triggers inside any event's source.
+/// - External edges faked: temporary boards only; the harvest script and event tool are not replaced.
+/// - What this proves: text a formal item quotes (an ACK, a NUL-split ACK, a signed R2 line) is the item's own prose for harvest as it is for replay, while the same hand-written line outside any source still cards and blocks dispatch.
+/// - What this intentionally does not exercise: fenced examples, covered by the out-of-order harvest test.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_harvest_ignores_triggers_inside_event_sources
+#[test]
+fn olp_board_harvest_ignores_triggers_inside_event_sources() {
+    let sb = Sandbox::new("harvest-event-sources");
+    let body = sb.file(
+        "quoting-item.txt",
+        "Report blockers like this:\nACK(blocked): example only\nA\0CK(blocked): example only\n> 外环(outer)·R2 记档(#1): example only\n"
+            .as_bytes(),
+    );
+    success_json(sb.event(&[
+        "item",
+        "--actor",
+        "outer",
+        "--number",
+        "8",
+        "--title",
+        "Quoting",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let state = sb.state();
+    assert_eq!(drift_kinds(&state), Vec::<String>::new());
+    assert_eq!(state["dispatch_blocked"], json!(false), "{state}");
+    let quiet = evo_cards(sb.harvest(&script("olp-board-event.py"), None));
+    assert!(quiet.is_empty(), "{quiet:?}");
+
+    assert!(
+        sb.shell_append(b"ACK(blocked): hand-written\n")
+            .status
+            .success()
+    );
+    assert_eq!(drift_kinds(&sb.state()), vec!["unpaired_ack".to_owned()]);
+    let carded = evo_cards(sb.harvest(&script("olp-board-event.py"), None));
+    assert_eq!(carded.len(), 1, "{carded:?}");
+    assert!(
+        carded[0].contains(&format!(
+            "#8#blocked#{}",
+            sha256_hex(b"ACK(blocked): hand-written")
+        )),
+        "{carded:?}"
+    );
 }

@@ -18,6 +18,8 @@ import time
 
 STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", re.ASCII)
 PROTOCOL_PREFIX = re.compile(rb"(?m)^> OLP-EVENT ")
+HARD_LINKED = ("Board has more than one hard link; each name would lock its own <name>.lock, "
+               "so keep exactly one link to the board")
 
 
 def timestamp(value):
@@ -29,6 +31,17 @@ def timestamp(value):
 
 def identity(value):
     return value.st_dev, value.st_ino
+
+
+def single_link(fd):
+    """Refuse a board that gained a second name after board_path() checked it.
+
+    Checked on the opened board once the lock is held, which covers a link
+    made while the lock was awaited. Locks derive from paths, so a link made
+    and removed concurrently with a write stays outside what they can guard.
+    """
+    if os.fstat(fd).st_nlink != 1:
+        raise ValueError(HARD_LINKED)
 
 
 @contextmanager
@@ -108,8 +121,7 @@ def board_path(value):
                          "writer shares one lock")
     path = Path(value).resolve(strict=True)
     if path.stat().st_nlink != 1:
-        raise ValueError("Board has more than one hard link; each name would lock its own "
-                         "<name>.lock, so keep exactly one link to the board")
+        raise ValueError(HARD_LINKED)
     return path
 
 
@@ -129,6 +141,7 @@ def read_snapshot(board_path_value, lock_timeout):
             with regular_file(board, os.O_RDONLY) as board_fd:
                 if identity(os.fstat(board_fd)) == identity(os.fstat(lock_fd)):
                     raise ValueError("Board must not alias its lock")
+                single_link(board_fd)
                 data = read_all(board_fd)
                 if identity(board.stat()) != identity(os.fstat(board_fd)):
                     raise ValueError("Board path changed during read")
@@ -178,6 +191,7 @@ def append_generated(board_path_value, lock_timeout, builder, progress,
             with regular_file(board, os.O_RDWR | os.O_APPEND) as fd:
                 if identity(os.fstat(fd)) == identity(os.fstat(lock_fd)):
                     raise ValueError("Board must not alias its lock")
+                single_link(fd)
                 offset = os.lseek(fd, 0, os.SEEK_END)
                 existing = read_region(fd, 0, offset)
                 partial = bool(existing) and not existing.endswith(b"\n")
@@ -217,6 +231,7 @@ def run(args, progress):
             with regular_file(board, flags) as fd:
                 if identity(os.fstat(fd)) in (identity(body_stat), identity(os.fstat(lock_fd))):
                     raise ValueError("Board must not alias the body or lock")
+                single_link(fd)
                 if args.command == "append":
                     offset = os.lseek(fd, 0, os.SEEK_END)
                     partial = bool(offset) and os.pread(fd, 1, offset - 1) != b"\n"
