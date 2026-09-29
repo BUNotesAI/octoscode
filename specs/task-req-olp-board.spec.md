@@ -23,7 +23,7 @@ estimate: 3d
 - 收口只追加：item/ack 的 recovery 精确消费一条未配对规范行或含 `ACK(outcome)` 的疑似 ACK，语义须匹配（同样不计 NUL）；void 精确隔离一条 malformed_event、未配对行、疑似 ACK 或 partial_tail；每段原文至多消费一次，证据分别进入 recovery_evidence 与 quarantine_evidence。actor 是逻辑名，任何 actor 都可写 void，由外环人工核对是约定而非强制。
 - sentinel 的固定输出前缀为 LEDGER-SIGNAL、BOARD-SIGNAL、DRIFT、ERROR、TIMEOUT；普通等待与尾部未完成行超时都输出 TIMEOUT JSON 行并退出 3。基线后的文字按字节匹配 token，含非 UTF-8 字节的行照常命中，展示时替换无法解码的字节。
 - harvest 先无锁检查板中是否有 `> OLP-EVENT ` 行，没有就直接走原 legacy 扫描器，不调用 Python、不取板锁；有此类行时在共享锁下回放，回放出有效事件才走结构化路径，否则仍走 legacy 扫描器；有此类行而事件工具或板锁缺失时明确失败，不静默走 legacy（`.lock` 是结构化采集的前提）；结构化路径经 `snapshot` 在共享锁下只读一次字节，回放、legacy 扫描与结构化扫描都用这份快照，快照之后的追加留给下一轮，同一 ACK 跨轮只有一个 identity；候选行按字节合并，旧 shell 写入的非 UTF-8 旧触发行照常出卡，legacy 候选行按行号换算出快照中的真实 offset 后再与回放区间比对（bash `read` 丢弃 NUL，它累加的 offset 不可靠），带 recovery 的 identity 与 legacy 扫描器一样不计 NUL，采集在任何失败路径上都以 `error:` 行退出并清理临时目录；取得 ack.item、item.number（`|` 转义）与围栏/隔离区间；给定的或解析后的板路径含 `|` 或换行时行协议无法承载，结构化采集只以一个物理行的 `error:` 退出（路径转义后显示；给定路径也要查，因为命令替换会吞掉结尾换行）；带 recovery 的 ACK 沿用被恢复原行的 legacy identity，使恢复前已落的卡不重复；保留 legacy ACK 与签名 override/R2，抑制围栏示例、已隔离行、任何正式事件的 source（事件自己的正文，不论引用了什么）及 ACK recovery 原文的重复卡；临时文件用 mktemp。
-- 板路径若是符号链接则拒绝，避免 Python 工具锁 `<目标>.lock` 而旧 shell 锁 `<链接>.lock`；板有多个硬链接（`st_nlink` 大于 1）时同样拒绝，否则每个路径各锁自己的 `.lock`；链接数在解析路径时查一次，取得锁、打开板后对打开的板再查一次（锁由路径派生，挡不住与写入并发的 link/unlink，是非对抗文件系统的前提）；旧 shell 按数值判断链接数，不从文件名文本推断；旧 shell 在已 opt-in 的板上同样拒绝，且不在链接旁建锁。
+- 板路径若是符号链接则拒绝，避免 Python 工具锁 `<目标>.lock` 而旧 shell 锁 `<链接>.lock`；板有多个硬链接（`st_nlink` 大于 1）时同样拒绝，否则每个路径各锁自己的 `.lock`；链接数在解析路径时查一次，取得锁、打开板后对打开的板再查一次（锁由路径派生，挡不住与写入并发的 link/unlink，是非对抗文件系统的前提）；旧 shell 按数值判断链接数，不从文件名文本推断；旧 shell 先把相对板路径改写成 `./<名字>`，以 `-`、`!`、`(` 开头的名字不会被 `find`/`grep` 读成选项或表达式；旧 shell 在已 opt-in 的板上同样拒绝，且不在链接旁建锁。
 - 各 CLI 把嵌套过深的 JSON 引发的递归错误与其他输入错误一样，报成一个机器 JSON 并退出 2；两个写入口的命令行参数解析错误也是写前失败，同样只输出一个 `may_have_appended=false` 的机器 JSON。
 - 依赖外部命令的 init 场景在 PATH 前放 `octoscode`/`octos` 空桩，测试结果不取决于开发机或 CI 是否全局安装这两个命令。
 - init 默认保持 legacy；`OLP_BOARD_MODE=structured` 只为新文件生成 receive→执行→ack 模板、带 opt-in 标记且无裸 ACK 占位的新板和独立普通锁，并把锁加入 `.gitignore`；按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具相邻安装且不覆盖，既有项目仅提示迁移，无 Python 时保留旧 shell 能力。
@@ -357,6 +357,15 @@ estimate: 3d
   假设 一块已 opt-in 的板和指向它的硬链接(各有 `.lock`),另有一个名字只是一个换行的硬链接
   当 通过任一路径运行 item、state、普通追加与旧 shell 追加,再删除硬链接后重试
   那么 有硬链接时都退出 2 且板字节不变,旧 shell 不在硬链接旁建锁;删除后照常工作
+
+场景: 旧 shell 把以 `-` 开头的板名当作路径
+  测试: olp_board_legacy_shell_treats_option_like_names_as_paths
+  Level: integration
+  Test Double: temporary boards named `-x` in two directories only
+  Targets: olp-board-append.sh opted-in guard
+  假设 一块名为 `-x` 的已 opt-in 板,以及另一目录下指向它、同样名为 `-x` 的硬链接
+  当 在各自目录里以相对名 `-x` 调用旧 shell,追加事件行与普通文字
+  那么 有硬链接时两边都以硬链接为由退出 2 且板字节不变;删去硬链接后事件行仍被拒绝,普通文字照常追加
 
 场景: 等锁期间出现的硬链接在取得锁后被发现
   测试: olp_board_writers_recheck_links_after_taking_the_lock

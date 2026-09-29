@@ -31,7 +31,7 @@ tags: [olp, protocol, blackboard, observability]
 
 [REQ-OLP-BOARD-HARVEST] 进化采集 MUST 只在板含 `> OLP-EVENT ` 行且回放出至少一条有效事件时走结构化路径；不含此类行的板（包括带旧 shell `.lock` 的 legacy 板）MUST 不调用 Python、不取板锁，输出与 legacy 扫描器逐字节一致；含此类行但无有效事件的板 MUST 回落到 legacy 扫描器；含此类行而事件工具或板 `.lock` 缺失时 MUST 明确非零失败，MUST NOT 静默回落 legacy。结构化路径 MUST 在共享锁下只读取一次板字节，回放、legacy 扫描与结构化扫描都基于这一快照，快照之后的追加留给下一轮；同一 ACK 行在连续各轮 MUST 得到同一个 identity。结构化路径 MUST 按字节处理候选行，旧 shell 写入的非 UTF-8 旧触发行 MUST 照常出卡；legacy 候选行 MUST 按行号换算出快照中的真实字节 offset 再与回放区间比对（bash `read` 会丢弃 NUL 字节，其累加的 offset 不可靠），带 recovery 的 identity MUST 与 legacy 扫描器一样不计 NUL，板上的 NUL 字节 MUST NOT 让同一 ACK 出两张卡；采集任何失败 MUST 以 `error:` 行非零退出，且 MUST 清理自己的临时目录。结构化路径 MUST 复用事件回放器和 item ID 取得展示编号，使乱序 ACK 归属原 item，行字段中的 `|` MUST 被转义，给定的或解析后的板路径含 `|` 或换行（行协议无法承载）时结构化采集 MUST 只以一个物理行的 `error:` 非零退出（路径转义后显示），带 recovery 的 ACK MUST 沿用被恢复原行的 legacy identity；MUST 保留 legacy ACK 与签名 override/R2 触发，只抑制围栏区间、已 void 区间、任何正式事件的 source（事件自己的正文，不论其中引用了什么）以及 ACK recovery 原文的重复卡。opt-in 后未闭合围栏 MUST 令采集明确非零失败且 MUST NOT 推进采集游标；legacy 采集函数 MUST 保持原行为。
 
-[REQ-OLP-BOARD-COMPAT] 旧 shell watcher MUST 保持运行行为不变；旧 shell 追加器对 legacy 板 MUST 保持不变，只在板已含事件行或 `<!-- olp-board/v1 -->` 标记时拒绝以 `> OLP-EVENT ` 开头的正文行与独立 `ts=` 时间行（判定与 Python 追加器一致，行尾只允许可选 CR），也拒绝不以 LF 结尾的正文，并在板以无 LF 的半行结尾时拒绝追加（与 Python 追加器一致，分两次追加拼不出事件行），并在这类板经符号链接路径调用或有多个硬链接时拒绝，MUST NOT 在链接旁另建锁。四个 Python CLI MUST 相邻部署、仅依赖标准库并与旧 shell 共用同一锁文件。
+[REQ-OLP-BOARD-COMPAT] 旧 shell watcher MUST 保持运行行为不变；旧 shell 追加器对 legacy 板 MUST 保持不变，只在板已含事件行或 `<!-- olp-board/v1 -->` 标记时拒绝以 `> OLP-EVENT ` 开头的正文行与独立 `ts=` 时间行（判定与 Python 追加器一致，行尾只允许可选 CR），也拒绝不以 LF 结尾的正文，并在板以无 LF 的半行结尾时拒绝追加（与 Python 追加器一致，分两次追加拼不出事件行），并在这类板经符号链接路径调用或有多个硬链接时拒绝，MUST NOT 在链接旁另建锁；板路径交给任何外部命令时 MUST 始终被当作路径（相对路径前加 `./`），以 `-`、`!` 或 `(` 开头的板名不得被读成选项或表达式而让上述判定失效。四个 Python CLI MUST 相邻部署、仅依赖标准库并与旧 shell 共用同一锁文件。
 
 [REQ-OLP-BOARD-DEPLOY] `olp-init.sh` MUST 默认保留 legacy 模板，仅在 `OLP_BOARD_MODE=structured` 且 Python 3 可用时为新项目生成 receive→执行→ack 模板、带 `<!-- olp-board/v1 -->` 标记且无裸 ACK 占位的新板、独立普通锁，并把该锁加入 `.gitignore`；结构化循环 MUST 按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具 MUST 以原文件名相邻安装且 MUST NOT 覆盖既有副本；既有项目文件 MUST NOT 被覆盖，只能输出迁移指引；无 Python 时 MUST 明示结构化能力不可用并保留旧 shell 工具。
 
@@ -189,6 +189,11 @@ Scenario: 有多个硬链接的板被拒绝
   When 通过任一路径运行 item、state、普通追加与旧 shell 追加，再删除硬链接后重试
   Then 有硬链接时都退出 2 且板字节不变，删除后照常工作
 
+Scenario: 旧 shell 把以 `-` 开头的板名当作路径
+  Given 一块名为 `-x` 的已 opt-in 板，以及另一目录下指向它、同样名为 `-x` 的硬链接
+  When 在各自目录里以相对名 `-x` 调用旧 shell，追加事件行、普通文字
+  Then 有硬链接时两边都以硬链接为由退出 2；删去硬链接后事件行仍被拒绝、普通文字照常追加
+
 Scenario: 等锁期间出现的硬链接在取得锁后被发现
   Given 写者与读者已通过路径检查，在等锁期间板多出一个名字
   When 它们取得锁
@@ -268,6 +273,7 @@ Scenario: legacy 与无 Python 降级保持可用
 - 作者自查（2026-09-29，基于 `58d2277`）：以孤立代理项转义作重复键的事件行让 state、inbox、sentinel 与采集整体失败；sentinel 遇到旧 shell 写入的非 UTF-8 行即报 ERROR 退出，重挂后该行的 token 永久漏报；bash `read` 丢弃 NUL 使 legacy offset 偏移，同一 ACK 出两张卡；旧 shell 可在已 opt-in 板的半行上续写，分两次拼出事件行。
 - 异构审查（codex，2026-09-29，基于 `a1e48c7`）：NUL 拆开 ACK 关键字时 state 报板干净而 harvest 出 blocked 卡；硬链接让同一块板分裂成两个锁域；板路径含 `|` 时采集行协议被击穿并输出 traceback；写入口的参数解析错误输出 usage 文本而不是机器 JSON。
 - 异构复审（codex，2026-09-29，基于 `9c09017`）：正式 item 正文里引用的 ACK 被 harvest 当作手写触发出卡；旧 shell 的硬链接检查可被换行文件名绕过，且各入口只在取锁前检查；换行路径的错误信息破成两行，结尾换行被命令替换吞掉后绕过检查。EVENTS/MCP 路径含 `|` 时字段错位是本 PR 之前就有的 legacy 行为，不在本需求范围。
+- 异构复审第三轮（codex，2026-09-29，基于 `3735e95`）：以 `-` 开头的相对板名被旧 shell 交给 `find`/`grep` 当作选项，opt-in 与硬链接判定都失效，事件行守卫与锁域保护一并被绕过。
 
 ## Open Questions
 
