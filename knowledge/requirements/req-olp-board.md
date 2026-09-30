@@ -35,7 +35,7 @@ tags: [olp, protocol, blackboard, observability]
 
 [REQ-OLP-BOARD-DEPLOY] `olp-init.sh` MUST 默认保留 legacy 模板，仅在 `OLP_BOARD_MODE=structured` 且 Python 3 可用时为新项目生成 receive→执行→ack 模板、带 `<!-- olp-board/v1 -->` 标记且无裸 ACK 占位的新板、独立普通锁，并把该锁加入 `.gitignore`；结构化循环 MUST 按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具 MUST 以原文件名相邻安装且 MUST NOT 覆盖既有副本；既有项目文件 MUST NOT 被覆盖，只能输出迁移指引；无 Python 时 MUST 明示结构化能力不可用并保留旧 shell 工具。
 
-[REQ-OLP-BOARD-TEST] 每个合约场景 MUST 绑定一个真实 Rust 集成测试函数，由测试直接调用生产 Python CLI、真实临时文件、真实旧 shell 锁和真实 harvest；故障注入 MUST 只存在于测试进程，生产 CLI MUST NOT 暴露故障后门。inbox 与 sentinel 的机器输出（结果、信号行与 ready 文件）在命令行参数含非 UTF-8 字节时 MUST 仍是合法 UTF-8 JSON，这类字节以转义形式显示，sentinel 命中后 MUST NOT 因输出失败退出；所有写入口失败（包括嵌套过深的 JSON 输入引发的递归错误与命令行参数解析错误）MUST 只输出一个机器 JSON，写前失败为 `may_have_appended=false`，write/fsync/readback/回执输出边界后的失败为 true。
+[REQ-OLP-BOARD-TEST] 每个合约场景 MUST 绑定一个真实 Rust 集成测试函数，由测试直接调用生产 Python CLI、真实临时文件、真实旧 shell 锁和真实 harvest；故障注入 MUST 只存在于测试进程，生产 CLI MUST NOT 暴露故障后门。inbox 与 sentinel 的机器输出（结果、信号行、错误行与 ready 文件）在命令行参数含非 UTF-8 字节时 MUST 仍是合法 UTF-8 JSON，这类字节以转义形式显示，sentinel 命中后 MUST NOT 因输出失败退出；所有写入口失败（包括嵌套过深的 JSON 输入引发的递归错误与命令行参数解析错误）MUST 只输出一个机器 JSON，写前失败为 `may_have_appended=false`，write/fsync/readback/回执输出边界后的失败为 true。
 
 ## Scenarios
 
@@ -191,8 +191,8 @@ Scenario: 标题含 `. ` 的 item 能以原编号和标题 recovery
 
 Scenario: 参数含非 UTF-8 字节时各 CLI 的机器输出仍可解析
   Given 一块结构化板
-  When sentinel 以含非 UTF-8 字节的 token 与 actor 命中一行，inbox 以含非 UTF-8 字节的 actor 查询，sentinel 以含非 UTF-8 字节的 --since-head 启动
-  Then 前两者退出 0，输出与 ready 文件都是可解析的 JSON（该字节以转义显示），后者以一条可解析的 ERROR 行退出 2，都没有 traceback
+  When sentinel 以含非 UTF-8 字节的 token 与 actor 命中一行，inbox 以含非 UTF-8 字节的 actor 查询，sentinel 与 inbox 各以含非 UTF-8 字节的未知 --since-head 启动
+  Then 前两者退出 0，输出与 ready 文件都是可解析的 JSON（该字节以转义显示）；后两者各以一条可解析的错误行退出 2，都没有 traceback
 
 Scenario: 有多个硬链接的板被拒绝
   Given 一块已 opt-in 的板和指向它的硬链接，其中一个名字只是一个换行

@@ -24,7 +24,7 @@ estimate: 3d
 - sentinel 的固定输出前缀为 LEDGER-SIGNAL、BOARD-SIGNAL、DRIFT、ERROR、TIMEOUT；普通等待与尾部未完成行超时都输出 TIMEOUT JSON 行并退出 3。基线后的文字按字节匹配 token，含非 UTF-8 字节的行照常命中，展示时替换无法解码的字节。
 - harvest 先无锁检查板中是否有 `> OLP-EVENT ` 行，没有就直接走原 legacy 扫描器，不调用 Python、不取板锁；有此类行时在共享锁下回放，回放出有效事件才走结构化路径，否则仍走 legacy 扫描器；有此类行而事件工具或板锁缺失时明确失败，不静默走 legacy（`.lock` 是结构化采集的前提）；结构化路径经 `snapshot` 在共享锁下只读一次字节，回放、legacy 扫描与结构化扫描都用这份快照，快照之后的追加留给下一轮，同一 ACK 跨轮只有一个 identity；候选行按字节合并，旧 shell 写入的非 UTF-8 旧触发行照常出卡，legacy 候选行按行号换算出快照中的真实 offset 后再与回放区间比对（bash `read` 遇到 NUL 时 4 及以上版本丢弃、3.2 截断，行数都不变，但累加的 offset 不可靠），带 recovery 的 ACK 沿用 legacy 扫描器同一轮为被恢复行给出的 identity（该行未出卡时才自行计算），结果与运行 harvest 的 bash 版本无关，采集在任何失败路径上都以 `error:` 行退出并清理临时目录；取得 ack.item、item.number（`|` 转义）与围栏/隔离区间；给定的或解析后的板路径含 `|` 或换行时行协议无法承载，结构化采集只以一个物理行的 `error:` 退出（路径转义后显示；给定路径也要查，因为命令替换会吞掉结尾换行）；带 recovery 的 ACK 沿用被恢复原行的 legacy identity，使恢复前已落的卡不重复；保留 legacy ACK 与签名 override/R2，抑制围栏示例、已隔离行、任何正式事件的 source（事件自己的正文，不论引用了什么）及 ACK recovery 原文的重复卡；临时文件用 mktemp。
 - 板路径若是符号链接则拒绝，避免 Python 工具锁 `<目标>.lock` 而旧 shell 锁 `<链接>.lock`；板有多个硬链接（`st_nlink` 大于 1）时同样拒绝，否则每个路径各锁自己的 `.lock`；链接数在解析路径时查一次，取得锁、打开板后对打开的板再查一次（锁由路径派生，挡不住与写入并发的 link/unlink，是非对抗文件系统的前提）；旧 shell 按数值判断链接数，不从文件名文本推断；旧 shell 先把相对板路径改写成 `./<名字>`，以 `-`、`!`、`(` 开头的名字不会被 `find`/`grep` 读成选项或表达式；旧 shell 在已 opt-in 的板上同样拒绝，且不在链接旁建锁。
-- inbox 与 sentinel 的机器输出（结果、信号行与 ready 文件）在命令行参数含非 UTF-8 字节时仍是合法 UTF-8 JSON（这类字节以转义显示），sentinel 命中后不会因输出失败退出。各 CLI 把嵌套过深的 JSON 引发的递归错误与其他输入错误一样，报成一个机器 JSON 并退出 2；两个写入口的命令行参数解析错误也是写前失败，同样只输出一个 `may_have_appended=false` 的机器 JSON。
+- inbox 与 sentinel 的机器输出（结果、信号行、错误行与 ready 文件）在命令行参数含非 UTF-8 字节时仍是合法 UTF-8 JSON（这类字节以转义显示），sentinel 命中后不会因输出失败退出。各 CLI 把嵌套过深的 JSON 引发的递归错误与其他输入错误一样，报成一个机器 JSON 并退出 2；两个写入口的命令行参数解析错误也是写前失败，同样只输出一个 `may_have_appended=false` 的机器 JSON。
 - 依赖外部命令的 init 场景在 PATH 前放 `octoscode`/`octos` 空桩，测试结果不取决于开发机或 CI 是否全局安装这两个命令。
 - init 默认保持 legacy；`OLP_BOARD_MODE=structured` 只为新文件生成 receive→执行→ack 模板、带 opt-in 标记且无裸 ACK 占位的新板和独立普通锁，并把锁加入 `.gitignore`；按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具相邻安装且不覆盖，既有项目仅提示迁移，无 Python 时保留旧 shell 能力。
 - 所有场景绑定 `tests/olp_board_protocol.rs` 中直接调用生产 CLI 的 Rust 集成测试，不用单一 Python suite wrapper 代替逐场景证据。
@@ -364,8 +364,8 @@ estimate: 3d
   Test Double: temporary boards and non-UTF-8 command-line arguments only
   Targets: olp-board-sentinel.py emit and ready file, olp-board-inbox.py output, the shared printable helper
   假设 一块结构化板
-  当 sentinel 以含非 UTF-8 字节的 token 与 actor 命中旧 shell 追加的一行,inbox 以含非 UTF-8 字节的 actor 查询,sentinel 以含非 UTF-8 字节的 --since-head 启动
-  那么 前两者退出 0,输出与 ready 文件都是可解析的 JSON(该字节以转义显示),后者以一条可解析的 ERROR 行退出 2,都没有 traceback
+  当 sentinel 以含非 UTF-8 字节的 token 与 actor 命中旧 shell 追加的一行,inbox 以含非 UTF-8 字节的 actor 查询,sentinel 与 inbox 各以含非 UTF-8 字节的未知 --since-head 启动
+  那么 前两者退出 0,输出与 ready 文件都是可解析的 JSON(该字节以转义显示);后两者各以一条可解析的错误行退出 2(sentinel 在 stdout 输出 ERROR 行,inbox 在 stderr 输出错误 JSON),都没有 traceback
 
 场景: 有多个硬链接的板被拒绝
   测试: olp_board_tools_refuse_hard_linked_boards
