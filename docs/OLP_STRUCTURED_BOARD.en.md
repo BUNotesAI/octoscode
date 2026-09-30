@@ -164,7 +164,9 @@ Sentinel prefixes are `LEDGER-SIGNAL` (ledger change), `BOARD-SIGNAL` (text
 wake-up only), `DRIFT`, `ERROR` and `TIMEOUT`; timeouts print `TIMEOUT: {...}`
 and exit 3, so check both prefix and exit code. Text is matched on bytes,
 so a line the legacy shell appended with bytes that are not UTF-8 still wakes
-it (undecodable bytes are shown replaced). The ledger, not the text,
+it (undecodable bytes are shown replaced); bytes that are not UTF-8 in a
+token, actor or `--since-head` argument are shown escaped in sentinel and
+inbox output and ready files. The ledger, not the text,
 decides completion. Keep the existing `events.jsonl` negative sentry; the
 sentinel never opens a turn, dispatches or executes anything.
 
@@ -176,7 +178,7 @@ Any DRIFT sets `mode=mixed` and `dispatch_blocked=true`. Each entry carries
 | kind | When | Reconcile with |
 |---|---|---|
 | `malformed_event` | an unfenced `> OLP-EVENT ` line anywhere fails validation (bad JSON, non-canonical, a source that is not adjacent, does not start at a line boundary, overlaps text already paired or consumed, or was changed, wrong `ts=` boundary, broken chain, illegal transition, bad recovery/void); evidence is the line without its LF | `void` |
-| `unpaired_item` | after opt-in, a `### number. title` line with no event | `item --recovery-file` with the same number and title, or `void` |
+| `unpaired_item` | after opt-in, a `### number. title` line with no event (split at the first `. `; writers refuse numbers containing `. `, titles may contain it) | `item --recovery-file` with the same number and title, or `void` |
 | `unpaired_ack` | after opt-in, an unpaired ACK line in v1 grammar (leading whitespace, a full-width colon and CRLF allowed) | `ack --recovery-file` with the same outcome, or `void` |
 | `suspected_ack` | after opt-in, an unpaired hand-written ACK variant: `> ACK(`, `- ACK(`, `### ACK`, `**ACK(...)**`, inline `ACK(`, the retired `ACK:` (prose that merely starts with the word ACK is not flagged, but any `ACK(` is) | ACK recovery if the line contains `ACK(outcome)` with the same outcome, otherwise `void` |
 | `unclosed_fence` | after opt-in, a code fence still open at end of file | append a closing line of the same kind, at least as long as the opener |
@@ -188,9 +190,11 @@ lines are flagged anywhere; voiding one on a board without any valid event
 makes that void the first event, which opts the board in. **Put examples inside closed code
 fences**: a quoted ACK is treated as a suspected hand-written ACK, because lanes
 really do write `> ACK(...)` and `### ACK` variants and those must not be missed.
-Normative lines and suspected ACKs are judged without NUL bytes, as the
-harvest's legacy scanner reads them (bash drops NUL), so a NUL splitting the
-keyword cannot hide a hand-written ACK.
+Normative lines and suspected ACKs are judged without NUL bytes, as bash 4+
+reads them (it drops NUL), so a NUL splitting the keyword cannot hide a
+hand-written ACK. macOS's stock bash 3.2 cuts the line at the NUL instead;
+harvest then may not card that line before its recovery, while `state` still
+reports the DRIFT and blocks dispatch.
 
 Evolution harvest (`olp-evo-harvest.sh`) takes the structured path on a board
 with event lines. It reads the board once, under the shared lock, through
@@ -203,9 +207,12 @@ non-zero and says which, instead of silently switching to the legacy scanner
 (which would card the same ACK again under another identity). Legacy boards
 without event lines are unaffected. The legacy shell appender does not check
 UTF-8, so a legacy trigger line may carry other bytes; the structured path
-still cards it. bash drops NUL bytes when it reads lines, so the structured
-path places each legacy-scanner row by its line number on the snapshot; a NUL
-on the board never cards one ACK twice. A trigger quoted inside any formal
+still cards it. When bash reads a line with a NUL byte, bash 4+ drops the
+byte and bash 3.2 cuts the line there; both keep the line count, so the
+structured path places each legacy-scanner row by its line number on the
+snapshot, and a recovering ACK adopts the identity the legacy scanner gave the
+recovered line in the same run, so a NUL never cards one ACK twice whichever
+bash runs harvest. A trigger quoted inside any formal
 event's source is that event's own text, as replay treats it, and is not
 carded. Candidate rows are `|`-separated and identities embed the board path,
 so a board whose given or resolved path contains `|` or a newline makes the

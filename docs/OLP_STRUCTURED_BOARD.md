@@ -216,7 +216,8 @@ runtime 尚未 receive 的 item 始终计入。基线要取自某次 inbox/senti
 sentinel 启动时先补读账本，再从启动字节基线之后扫描文字。输出前缀分别是
 `LEDGER-SIGNAL`（启动补读或后续账本变化）、`BOARD-SIGNAL`（文字只负责唤醒）、
 `DRIFT`、`ERROR` 和 `TIMEOUT`。文字按字节匹配 token，旧 shell 写入的非 UTF-8
-行照常命中（展示时替换无法解码的字节）。普通等待超时及尾部未完成行持续到期限都会在
+行照常命中（展示时替换无法解码的字节）；token、actor 或 `--since-head` 参数里的非
+UTF-8 字节在 sentinel 与 inbox 的输出和 ready 文件里以转义形式显示。普通等待超时及尾部未完成行持续到期限都会在
 stdout 输出 `TIMEOUT: {...}` 并退出 3；监视方必须同时检查前缀和退出码。正信号的完成判定始终以账本为准；原有
 `events.jsonl` 的 `goal_transition blocked`/`escalation` 负信号哨继续挂载。
 sentinel 不会自动开 turn、派单或执行，也不替代
@@ -231,7 +232,7 @@ sentinel 不会自动开 turn、派单或执行，也不替代
 | kind | 何时出现 | 收口方式 |
 |---|---|---|
 | `malformed_event` | 任意位置一条未进围栏的 `> OLP-EVENT ` 行未通过校验（坏 JSON、非 canonical、source 不相邻、不从行首开始、与已配对或已消费的文字重叠，或字节被改、ts 边界不对、坏链、非法生命周期、坏 recovery/void）；证据是该行不含 LF 的字节 | `void` |
-| `unpaired_item` | opt-in 后未与事件配对的 `### 编号. 标题` 行 | 同编号标题的 `item --recovery-file`，或 `void` |
+| `unpaired_item` | opt-in 后未与事件配对的 `### 编号. 标题` 行（在第一个 `. ` 处拆分，写入端拒绝含 `. ` 的编号，标题可以含 `. `） | 同编号标题的 `item --recovery-file`，或 `void` |
 | `unpaired_ack` | opt-in 后未配对、符合 v1 语法的 ACK 行（允许前导空白、全角冒号与 CRLF） | outcome 相同的 `ack --recovery-file`，或 `void` |
 | `suspected_ack` | opt-in 后未配对的疑似手写 ACK：`> ACK(`、`- ACK(`、`### ACK`、`**ACK(...)**`、行内 `ACK(`、旧式 `ACK:`（仅以 ACK 一词开头的普通文字不算，但任何 `ACK(` 都算） | 行内有 `ACK(outcome)` 时可用同 outcome 的 ack recovery，否则只能 `void` |
 | `unclosed_fence` | opt-in 后直到文件末尾仍未闭合的代码围栏 | 追加同种且不短于 opener 的闭合行 |
@@ -241,8 +242,10 @@ sentinel 不会自动开 turn、派单或执行，也不替代
 规范文字不追溯，但坏事件行在任何位置都会报出；在还没有有效事件的板上 void
 它，这条 void 就成为第一条事件，板随之 opt-in。**示例文字必须放进已闭合的代码围栏**；引用块里的 ACK 也会被当作
 疑似手写 ACK（上游规模化实战中车道确实会写 `> ACK(...)`、`### ACK` 这类变体，
-它们必须被看见，不能静默漏掉）。判定规范行和疑似 ACK 时先去掉 NUL 字节，与进化
-采集的旧扫描器（bash 读行时丢掉 NUL）看到的一致，NUL 拆开关键字也藏不住手写 ACK。
+它们必须被看见，不能静默漏掉）。判定规范行和疑似 ACK 时先去掉 NUL 字节（与 bash 4
+及以上读行时丢掉 NUL 一致），NUL 拆开关键字也藏不住手写 ACK。macOS 自带的 bash 3.2 读
+行时在 NUL 处截断，这时进化采集在 recovery 之前可能不为这一行出卡，但 state 照样报
+DRIFT、阻止派发。
 
 反引号与波浪线围栏都必须由同种类、且长度不短于 opener 的闭合行结束；错误种类
 或更短的行仍属于围栏正文。未闭合围栏会以 opener 行的字节证据报
@@ -257,8 +260,10 @@ sentinel 不会自动开 turn、派单或执行，也不替代
 identity。因此板旁的 `.lock` 和相邻安装的事件工具是结构化采集的前提：板里已有事件行
 而二者缺一时，harvest 明确非零失败并指明缺什么，不会静默改用旧扫描器（那样同一条 ACK
 会换一个 identity 再出一张卡）。不含事件行的 legacy 板不受影响。旧 shell 追加器不校验
-UTF-8，含其他字节的旧触发行在结构化路径上照常出卡；bash 读行会丢掉 NUL 字节，结构化
-路径因此按行号在快照上定位旧扫描器的每一行，NUL 不会让同一条 ACK 出两张卡；任何正式
+UTF-8，含其他字节的旧触发行在结构化路径上照常出卡；bash 读行遇到 NUL 时，4 及以上
+版本丢掉该字节、3.2 在该处截断，行数都不变，结构化路径因此按行号在快照上定位旧扫描器的
+每一行；带 recovery 的 ACK 沿用旧扫描器同一轮给被恢复行的 identity，所以不论哪个版本的
+bash 在跑，NUL 都不会让同一条 ACK 出两张卡；任何正式
 事件的正文（source）里引用的触发行都不出卡，与回放把它当作事件自己的文字一致；候选行以
 `|` 分隔、identity 含板路径，给定的或解析后的板路径含 `|` 或换行时，结构化采集只以一行
 `error:` 退出；采集任何失败都以 `error:` 行退出并
