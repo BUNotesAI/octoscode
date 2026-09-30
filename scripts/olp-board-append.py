@@ -33,6 +33,23 @@ def identity(value):
     return value.st_dev, value.st_ino
 
 
+def printable(value):
+    """A copy of a JSON-ready value whose strings all encode as UTF-8.
+
+    Command-line arguments reach Python with undecodable bytes as lone
+    surrogates, which no UTF-8 stream accepts; the inbox and the sentinel show
+    them as backslash escapes rather than failing the output after the work is
+    done.
+    """
+    if isinstance(value, str):
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
+    if isinstance(value, dict):
+        return {printable(key): printable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [printable(item) for item in value]
+    return value
+
+
 def single_link(fd):
     """Refuse a board that gained a second name after board_path() checked it.
 

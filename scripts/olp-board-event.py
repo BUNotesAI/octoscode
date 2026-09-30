@@ -30,7 +30,9 @@ TYPE_FIELDS = {
     "resolve": {"review", "next"},
     "void": {"target"},
 }
-ITEM_LINE = re.compile(rb"### ([^\r\n]+)\. ([^\r\n]+)\r?\n\Z")
+# The number ends at the first ". " (writers refuse numbers containing one), so
+# a title may contain ". " and a rendered heading always parses back.
+ITEM_LINE = re.compile(rb"### ((?:(?!\. )[^\r\n])+)\. ([^\r\n]+)\r?\n\Z")
 # The v1 ACK grammar (tests/olp_contract.rs) trims leading whitespace, and the
 # harvest scanner also accepts a full-width colon.
 ACK_LINE = re.compile(rb"[ \t]*ACK\((done|wontdo|blocked)\)(?::|\xef\xbc\x9a)[^\r\n]*\r?\n\Z")
@@ -670,6 +672,9 @@ def read_state(board, lock_timeout=10.0):
 def build_event(state, kind, actor, fields, source, offset, ts, event_id=None):
     require(kind in TYPE_FIELDS, "Unknown event type")
     require(set(fields) == TYPE_FIELDS[kind], "Missing or unexpected event fields")
+    require(not (kind == "item" and isinstance(fields["number"], str) and ". " in fields["number"]),
+            "Item number must not contain '. ': the heading '### <number>. <title>' splits "
+            "at the first '. '")
     event = {"schema": SCHEMA, "id": event_id or secrets.token_hex(16),
              "prev": state.head, "type": kind,
              "actor": actor, "ts": ts, "source": source_ref(offset, source), **fields}

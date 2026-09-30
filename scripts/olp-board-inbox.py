@@ -33,6 +33,11 @@ def nonnegative_finite(value):
     return number
 
 
+def printable(value):
+    """Keep machine output valid UTF-8 JSON when arguments carry non-UTF-8 bytes."""
+    return event_module().board_module().printable(value)
+
+
 def query(board, role, actor, since_head=None, lock_timeout=10.0):
     """Project actionable ledger state for one role.
 
@@ -84,7 +89,7 @@ def query(board, role, actor, since_head=None, lock_timeout=10.0):
 
 def write_ready(path, result):
     with open(path, "x", encoding="utf-8") as stream:
-        json.dump({"status": "initial_query_ok", "pid": os.getpid(), **result}, stream,
+        json.dump(printable({"status": "initial_query_ok", "pid": os.getpid(), **result}), stream,
                   ensure_ascii=False, allow_nan=False)
         stream.write("\n")
 
@@ -111,11 +116,12 @@ def main(argv=None):
                 if args.ready_file:
                     write_ready(args.ready_file, result)
             if result["dispatch_blocked"] or result["matched"] or not args.wait:
-                print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+                print(json.dumps(printable(result), ensure_ascii=False, allow_nan=False))
                 return 0
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                print(json.dumps({"status": "timeout", **result}, ensure_ascii=False), file=sys.stderr)
+                print(json.dumps(printable({"status": "timeout", **result}), ensure_ascii=False),
+                      file=sys.stderr)
                 return 3
             time.sleep(min(args.interval, remaining))
     # RecursionError: deeply nested JSON input is an input error like any other.

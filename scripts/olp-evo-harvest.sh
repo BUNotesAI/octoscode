@@ -180,10 +180,10 @@ def exact(evidence):
     return raw
 
 def legacy_identity(offset, raw, kind):
-    # The identity harvest_board gives this line (nearest `### <digits>`
-    # heading above it, sha256 of the line without LF), so a hand-written
-    # ACK carded before its recovery keeps the same card afterwards. bash
-    # `read` drops NUL bytes, so they count for neither.
+    # Fallback for a recovered line the legacy scan did not card in this run
+    # (the merge otherwise adopts the scanner's own identity): the one
+    # harvest_board would give it under bash 4+, whose `read` drops NUL bytes
+    # (nearest `### <digits>` heading above it, sha256 of the line without LF).
     entry = "-1"
     for line in data[:offset].replace(b"\0", b"").split(b"\n"):
         match = HEADING.match(line)
@@ -271,14 +271,29 @@ import json, sys
 
 state_path, board_path, legacy_path, structured_path, output_path = sys.argv[1:]
 state = json.load(open(state_path, encoding="utf-8"))
-# bash `read` drops NUL bytes, so the offsets the legacy scanner adds up drift
-# after one while its line numbers do not: place each row by its line number.
+# bash `read` changes a line at a NUL byte (bash 4+ drops the byte, bash 3.2
+# cuts the line there) but keeps the line count, so the offsets the legacy
+# scanner adds up drift while its line numbers do not: place each row by its
+# line number.
 data = open(board_path, "rb").read()
 line_starts = [0]
 position = data.find(b"\n")
 while position >= 0:
     line_starts.append(position + 1)
     position = data.find(b"\n", position + 1)
+line_of = {start: number for number, start in enumerate(line_starts, 1)}
+legacy_rows = [raw.rstrip(b"\n").split(b"|", 7) for raw in open(legacy_path, "rb") if raw.strip()]
+# A recovered ACK keeps the identity the legacy scanner gave its line in this
+# run, so the card made before the recovery is not repeated whichever bash
+# reads the board; the structured scan computes one only when none was carded.
+scanned_acks = {int(parts[4]): parts[3] for parts in legacy_rows
+                if parts[0] in (b"ack_blocked", b"ack_wontdo")}
+adopted = {}
+for event in state.get("events", []):
+    if event.get("type") == "ack" and event.get("recovery") is not None:
+        identity = scanned_acks.get(line_of.get(event["recovery"]["offset"]))
+        if identity is not None:
+            adopted[str(event["source"]["offset"]).encode("ascii")] = identity
 # Text an event owns (its source) is ledger prose whatever it quotes, as replay
 # treats it; a recovered hand-written ACK is carded once, by its structured row.
 recovered_acks = []
@@ -300,10 +315,7 @@ def covered(point, intervals):
 # Rows stay bytes: the legacy shell appender never validates UTF-8, so a
 # legacy trigger line may carry other bytes and must still be carded as is.
 with open(output_path, "wb") as output:
-    for raw in open(legacy_path, "rb"):
-        if not raw.strip():
-            continue
-        parts = raw.rstrip(b"\n").split(b"|", 7)
+    for parts in legacy_rows:
         point = line_starts[int(parts[4]) - 1]
         if covered(point, suppressed):
             continue
@@ -311,7 +323,12 @@ with open(output_path, "wb") as output:
             continue
         parts[5] = str(point).encode("ascii")
         output.write(b"|".join(parts) + b"\n")
-    output.write(open(structured_path, "rb").read())
+    for raw in open(structured_path, "rb"):
+        if not raw.strip():
+            continue
+        parts = raw.rstrip(b"\n").split(b"|", 7)
+        parts[3] = adopted.get(parts[5], parts[3])
+        output.write(b"|".join(parts) + b"\n")
 PY
     then
         rm -rf "$work"

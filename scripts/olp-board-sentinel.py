@@ -33,8 +33,17 @@ def nonnegative_finite(value):
     return number
 
 
+# Set once the board tools load: keeps every emitted line valid UTF-8 JSON when
+# the token, actor or --since-head carries bytes that are not UTF-8.
+PRINTABLE = None
+
+
 def emit(prefix, payload):
-    print(prefix + ": " + json.dumps(payload, ensure_ascii=False, allow_nan=False), flush=True)
+    if PRINTABLE is None:
+        text = json.dumps(payload, allow_nan=False)
+    else:
+        text = json.dumps(PRINTABLE(payload), ensure_ascii=False, allow_nan=False)
+    print(prefix + ": " + text, flush=True)
 
 
 def signature(result):
@@ -43,7 +52,7 @@ def signature(result):
 
 def write_ready(path, result):
     with open(path, "x", encoding="utf-8") as stream:
-        json.dump({"status": "sentinel_ready", "pid": os.getpid(), **result}, stream,
+        json.dump(PRINTABLE({"status": "sentinel_ready", "pid": os.getpid(), **result}), stream,
                   ensure_ascii=False, allow_nan=False)
         stream.write("\n")
 
@@ -66,7 +75,9 @@ def main(argv=None):
         # validates UTF-8, and a line it wrote must wake the watcher, not end it.
         token = os.fsencode(args.token)
         skips = [os.fsencode(skip) for skip in args.skip_signature]
+        global PRINTABLE
         inbox = inbox_module()
+        PRINTABLE = inbox.event_module().board_module().printable
         board = inbox.event_module().board_module().board_path(args.board)
         stat = board.stat()
         baseline = stat.st_size

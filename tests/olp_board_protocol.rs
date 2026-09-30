@@ -2376,9 +2376,23 @@ impl Sandbox {
     }
 
     fn harvest(&self, event_tool: &PathBuf, path_prefix: Option<&PathBuf>) -> Output {
+        self.harvest_with(Path::new("bash"), event_tool, path_prefix)
+    }
+
+    /// Harvest dry-run with the real event tool under one specific bash.
+    fn harvest_under(&self, shell: &Path) -> Output {
+        self.harvest_with(shell, &script("olp-board-event.py"), None)
+    }
+
+    fn harvest_with(
+        &self,
+        shell: &Path,
+        event_tool: &PathBuf,
+        path_prefix: Option<&PathBuf>,
+    ) -> Output {
         let repo_root = self.root.join("repo");
         fs::create_dir_all(&repo_root).unwrap();
-        let mut command = Command::new("bash");
+        let mut command = Command::new(shell);
         command
             .arg(script("olp-evo-harvest.sh"))
             .arg(&repo_root)
@@ -2394,6 +2408,50 @@ impl Sandbox {
         }
         command.output().unwrap()
     }
+}
+
+/// Every distinct bash on this host the harvest may run under: the one on PATH
+/// and the system `/bin/bash` (on macOS that is 3.2, whose `read` cuts a line
+/// at a NUL byte where bash 4+ drops the byte).
+fn harvest_shells() -> Vec<PathBuf> {
+    let mut shells = Vec::new();
+    let mut versions = Vec::new();
+    for candidate in ["bash", "/bin/bash"] {
+        let Ok(output) = Command::new(candidate)
+            .args(["-c", "printf %s \"$BASH_VERSION\""])
+            .output()
+        else {
+            continue;
+        };
+        let version = String::from_utf8_lossy(&output.stdout).into_owned();
+        if output.status.success() && !versions.contains(&version) {
+            versions.push(version);
+            shells.push(PathBuf::from(candidate));
+        }
+    }
+    assert!(!shells.is_empty(), "no bash found");
+    shells
+}
+
+/// Whether this bash's `read` drops a NUL byte (bash 4+) rather than cutting
+/// the line there (bash 3.2).
+fn read_drops_nul(shell: &Path) -> bool {
+    let mut child = Command::new(shell)
+        .args(["-c", "IFS= read -r line; printf %s \"$line\""])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"A\0B\n").unwrap();
+    child.wait_with_output().unwrap().stdout == b"AB"
+}
+
+/// The `identity:` line of one harvest card.
+fn card_identity(card: &str) -> String {
+    card.lines()
+        .find_map(|line| line.strip_prefix("identity: "))
+        .unwrap_or_else(|| panic!("no identity in {card}"))
+        .to_owned()
 }
 
 /// The cards a successful harvest dry-run printed, one string per card.
@@ -3755,54 +3813,52 @@ fn olp_board_sentinel_matches_tokens_in_non_utf8_text() {
 }
 
 /// Test Path Statement:
-/// - Tier: Real-path regression.
-/// - Production entrypoint: olp-evo-harvest.sh --dry-run, twice.
-/// - Production path: the candidate merge places legacy rows on the snapshot, and a recovering ACK reuses the legacy identity of the recovered line.
+/// - Tier: Real-path regression, under every bash on the host.
+/// - Production entrypoint: olp-evo-harvest.sh --dry-run, twice, under each distinct bash (the one on PATH and /bin/bash; on macOS the latter is 3.2).
+/// - Production path: the candidate merge places legacy rows by line number, and a recovering ACK adopts the identity the legacy scanner gave the recovered line.
 /// - External edges faked: temporary boards only; the harvest script and event tool are not replaced.
-/// - What this proves: bash `read` drops NUL bytes, yet a NUL on the board neither cards one ACK twice nor misplaces the offset of a later legacy trigger.
+/// - What this proves: whether bash `read` drops a NUL byte (4+) or cuts the line there (3.2), a NUL on the board neither cards one ACK twice across its recovery nor misplaces the offset of a later legacy trigger.
 /// - What this intentionally does not exercise: committing cards, covered by the identity-after-recovery test.
 /// - Focused command: cargo test --test olp_board_protocol olp_board_harvest_ignores_nul_bytes_like_the_legacy_scanner
 #[test]
 fn olp_board_harvest_ignores_nul_bytes_like_the_legacy_scanner() {
-    let sb = Sandbox::new("harvest-nul");
-    let item = sb.item("8", "Blocked work", "outer", "runtime");
-    let item_id = item["event"].as_str().unwrap();
-    success_json(sb.receive("runtime", item_id));
-    let line: &[u8] = b"ACK(blocked): power\0 supply lost\n";
-    let offset = sb.len();
-    assert!(sb.shell_append(line).status.success());
-    // The legacy scanner reads lines with bash `read`, which drops NUL.
-    let scanner_identity = format!(
-        "#8#blocked#{}",
-        sha256_hex(b"ACK(blocked): power supply lost")
-    );
-    let first = evo_cards(sb.harvest(&script("olp-board-event.py"), None));
-    assert_eq!(first.len(), 1, "{first:?}");
-    assert!(first[0].contains(&scanner_identity), "{first:?}");
+    for shell in harvest_shells() {
+        let sb = Sandbox::new("harvest-nul");
+        let item = sb.item("8", "Blocked work", "outer", "runtime");
+        let item_id = item["event"].as_str().unwrap();
+        success_json(sb.receive("runtime", item_id));
+        let line: &[u8] = b"ACK(blocked): power\0 supply lost\n";
+        let offset = sb.len();
+        assert!(sb.shell_append(line).status.success());
+        let first = evo_cards(sb.harvest_under(&shell));
+        assert_eq!(first.len(), 1, "{shell:?} {first:?}");
+        assert!(first[0].contains("#8#blocked#"), "{shell:?} {first:?}");
+        let identity = card_identity(&first[0]);
 
-    success_json(sb.ack_recovering(item_id, "blocked", &source_ref(offset, line)));
-    let signed_at = sb.len();
-    assert!(
-        sb.shell_append("> 外环(outer)·R2 记档(#8): checked by hand\n".as_bytes())
-            .status
-            .success()
-    );
-    let second = evo_cards(sb.harvest(&script("olp-board-event.py"), None));
-    assert_eq!(second.len(), 2, "{second:?}");
-    let blocked: Vec<&String> = second
-        .iter()
-        .filter(|card| card.contains("#blocked#"))
-        .collect();
-    assert_eq!(blocked.len(), 1, "{second:?}");
-    assert!(blocked[0].contains(&scanner_identity), "{second:?}");
-    let signed = second
-        .iter()
-        .find(|card| card.contains("trigger: r2_record"))
-        .unwrap_or_else(|| panic!("no R2 card in {second:?}"));
-    assert!(
-        signed.contains(&format!(" offset={signed_at} ")),
-        "{signed}"
-    );
+        success_json(sb.ack_recovering(item_id, "blocked", &source_ref(offset, line)));
+        let signed_at = sb.len();
+        assert!(
+            sb.shell_append("> 外环(outer)·R2 记档(#8): checked by hand\n".as_bytes())
+                .status
+                .success()
+        );
+        let second = evo_cards(sb.harvest_under(&shell));
+        assert_eq!(second.len(), 2, "{shell:?} {second:?}");
+        let blocked: Vec<&String> = second
+            .iter()
+            .filter(|card| card.contains("#blocked#"))
+            .collect();
+        assert_eq!(blocked.len(), 1, "{shell:?} {second:?}");
+        assert_eq!(card_identity(blocked[0]), identity, "{shell:?}");
+        let signed = second
+            .iter()
+            .find(|card| card.contains("trigger: r2_record"))
+            .unwrap_or_else(|| panic!("no R2 card in {second:?}"));
+        assert!(
+            signed.contains(&format!(" offset={signed_at} ")),
+            "{shell:?} {signed}"
+        );
+    }
 }
 
 /// Test Path Statement:
@@ -3849,38 +3905,41 @@ fn olp_board_legacy_shell_keeps_lines_whole_on_opted_in_boards() {
 }
 
 /// Test Path Statement:
-/// - Tier: Real-path regression.
-/// - Production entrypoint: event state and ack --recovery-file CLIs, and olp-evo-harvest.sh --dry-run.
-/// - Production path: replay's normative classification and recovery matching, against the legacy scanner's bash `read`.
+/// - Tier: Real-path regression, under every bash on the host.
+/// - Production entrypoint: event state and ack --recovery-file CLIs, and olp-evo-harvest.sh --dry-run under each distinct bash.
+/// - Production path: replay's NUL-blind normative classification and recovery matching, the legacy scanner's bash `read`, and the recovered identity.
 /// - External edges faked: temporary boards only; the harvest script and event tool are not replaced.
-/// - What this proves: a NUL byte splitting the ACK keyword cannot make state report a clean board while harvest cards a blocked ACK; both see the line the same way before and after its recovery.
+/// - What this proves: a NUL byte splitting the ACK keyword always blocks dispatch, harvest cards the line once when its bash reads the keyword (4+) and not at all when it cuts the line (3.2), and the ACK has one identity across its recovery either way.
 /// - What this intentionally does not exercise: NUL inside an explanation, covered by the NUL offset test.
-/// - Focused command: cargo test --test olp_board_protocol olp_board_replay_and_harvest_agree_on_nul_split_ack_lines
+/// - Focused command: cargo test --test olp_board_protocol olp_board_nul_split_ack_blocks_dispatch_and_cards_once
 #[test]
-fn olp_board_replay_and_harvest_agree_on_nul_split_ack_lines() {
-    let sb = Sandbox::new("nul-split-ack");
-    let item = sb.item("8", "Blocked work", "outer", "runtime");
-    let item_id = item["event"].as_str().unwrap();
-    success_json(sb.receive("runtime", item_id));
-    let line: &[u8] = b"A\0CK(blocked): hidden by NUL\n";
-    let offset = sb.len();
-    assert!(sb.shell_append(line).status.success());
-    let identity = format!("#8#blocked#{}", sha256_hex(b"ACK(blocked): hidden by NUL"));
+fn olp_board_nul_split_ack_blocks_dispatch_and_cards_once() {
+    for shell in harvest_shells() {
+        let sb = Sandbox::new("nul-split-ack");
+        let item = sb.item("8", "Blocked work", "outer", "runtime");
+        let item_id = item["event"].as_str().unwrap();
+        success_json(sb.receive("runtime", item_id));
+        let line: &[u8] = b"A\0CK(blocked): hidden by NUL\n";
+        let offset = sb.len();
+        assert!(sb.shell_append(line).status.success());
 
-    let state = sb.state();
-    assert_eq!(state["dispatch_blocked"], json!(true), "{state}");
-    assert_eq!(drift_kinds(&state), vec!["unpaired_ack".to_owned()]);
-    let first = evo_cards(sb.harvest(&script("olp-board-event.py"), None));
-    assert_eq!(first.len(), 1, "{first:?}");
-    assert!(first[0].contains(&identity), "{first:?}");
+        let state = sb.state();
+        assert_eq!(state["dispatch_blocked"], json!(true), "{state}");
+        assert_eq!(drift_kinds(&state), vec!["unpaired_ack".to_owned()]);
+        let first = evo_cards(sb.harvest_under(&shell));
+        let expected = usize::from(read_drops_nul(&shell));
+        assert_eq!(first.len(), expected, "{shell:?} {first:?}");
 
-    success_json(sb.ack_recovering(item_id, "blocked", &source_ref(offset, line)));
-    let state = sb.state();
-    assert_eq!(drift_kinds(&state), Vec::<String>::new());
-    assert_eq!(state["dispatch_blocked"], json!(false), "{state}");
-    let second = evo_cards(sb.harvest(&script("olp-board-event.py"), None));
-    assert_eq!(second.len(), 1, "{second:?}");
-    assert!(second[0].contains(&identity), "{second:?}");
+        success_json(sb.ack_recovering(item_id, "blocked", &source_ref(offset, line)));
+        let state = sb.state();
+        assert_eq!(drift_kinds(&state), Vec::<String>::new());
+        assert_eq!(state["dispatch_blocked"], json!(false), "{state}");
+        let second = evo_cards(sb.harvest_under(&shell));
+        assert_eq!(second.len(), 1, "{shell:?} {second:?}");
+        if let Some(card) = first.first() {
+            assert_eq!(card_identity(card), card_identity(&second[0]), "{shell:?}");
+        }
+    }
 }
 
 /// Test Path Statement:
@@ -4409,5 +4468,165 @@ fn olp_board_legacy_shell_treats_option_like_names_as_paths() {
         fs::read(one.join("-x"))
             .unwrap()
             .ends_with(b"Plain note.\n")
+    );
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: event state and item CLIs.
+/// - Production path: the item heading pattern, recovery matching and the item writer's number check.
+/// - External edges faked: temporary boards; a raw append stands in for a hand-written heading.
+/// - What this proves: a heading whose title contains ". " recovers with its own number and title, and no writer can produce a number that would make its heading ambiguous.
+/// - What this intentionally does not exercise: ACK recovery, covered by the recovery tests.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_item_numbers_stay_parseable_for_titles_with_dot_space
+#[test]
+fn olp_board_item_numbers_stay_parseable_for_titles_with_dot_space() {
+    let sb = Sandbox::new("item-dot-space");
+    sb.item("1", "Opted in", "outer", "runtime");
+    let heading: &[u8] = b"### 9. Fix. the thing with dots\n";
+    let offset = sb.len();
+    sb.raw_append(heading);
+    sb.raw_append(b"Body.\n");
+    assert_eq!(drift_kinds(&sb.state()), vec!["unpaired_item".to_owned()]);
+    let before = fs::read(&sb.board).unwrap();
+    let body = sb.file("dot-space-body.txt", b"Recovered item.\n");
+    let evidence = sb.file(
+        "dot-space-evidence.json",
+        &serde_json::to_vec(&source_ref(offset, heading)).unwrap(),
+    );
+    let item = |number: &str, title: &str| {
+        sb.event(&[
+            "item",
+            "--actor",
+            "outer",
+            "--number",
+            number,
+            "--title",
+            title,
+            "--body-file",
+            body.to_str().unwrap(),
+            "--recovery-file",
+            evidence.to_str().unwrap(),
+        ])
+    };
+
+    failed(
+        item("9. Fix", "the thing with dots"),
+        "must not contain '. '",
+    );
+    assert_eq!(fs::read(&sb.board).unwrap(), before);
+    success_json(item("9", "Fix. the thing with dots"));
+    assert_eq!(drift_kinds(&sb.state()), Vec::<String>::new());
+}
+
+/// Test Path Statement:
+/// - Tier: Real-path regression.
+/// - Production entrypoint: olp-board-sentinel.py and olp-board-inbox.py with non-UTF-8 arguments.
+/// - Production path: the shared printable helper in front of every machine output.
+/// - External edges faked: temporary boards and non-UTF-8 command-line arguments only.
+/// - What this proves: a token, actor or --since-head carrying bytes that are not UTF-8 is shown escaped; the sentinel still reports its match, the inbox still answers, and an unknown --since-head is one parseable ERROR line instead of a traceback.
+/// - What this intentionally does not exercise: non-UTF-8 board text, covered by the sentinel byte-matching test.
+/// - Focused command: cargo test --test olp_board_protocol olp_board_cli_output_survives_non_utf8_arguments
+#[test]
+fn olp_board_cli_output_survives_non_utf8_arguments() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let sb = Sandbox::new("non-utf8-args");
+    sb.item("1", "First", "outer", "runtime");
+    let ready = sb.root.join("ready.json");
+    let watcher = Command::new("python3")
+        .arg("-B")
+        .arg(script("olp-board-sentinel.py"))
+        .arg("--board")
+        .arg(&sb.board)
+        .arg("--token")
+        .arg(OsStr::from_bytes(b"WAKE-\xff"))
+        .arg("--actor")
+        .arg(OsStr::from_bytes(b"out\xffer"))
+        .args([
+            "--for",
+            "outer",
+            "--interval",
+            "0.02",
+            "--timeout",
+            "10",
+            "--ready-file",
+        ])
+        .arg(&ready)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_file(&ready);
+    assert!(sb.shell_append(b"note WAKE-\xff here\n").status.success());
+    let output = watcher.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let signal: Value = serde_json::from_str(
+        stdout
+            .strip_prefix("BOARD-SIGNAL: ")
+            .unwrap_or_else(|| panic!("no BOARD-SIGNAL in {stdout}"))
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(signal["token"], json!("WAKE-\\udcff"));
+    assert_eq!(signal["matches"], json!(["note WAKE-\u{fffd} here"]));
+    let ready_state: Value = serde_json::from_slice(&fs::read(&ready).unwrap()).unwrap();
+    assert_eq!(ready_state["actor"], json!("out\\udcffer"));
+
+    let inbox_ready = sb.root.join("inbox-ready.json");
+    let inbox = success_json(
+        Command::new("python3")
+            .arg("-B")
+            .arg(script("olp-board-inbox.py"))
+            .arg("--board")
+            .arg(&sb.board)
+            .args(["--for", "runtime", "--actor"])
+            .arg(OsStr::from_bytes(b"run\xfftime"))
+            .arg("--ready-file")
+            .arg(&inbox_ready)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(inbox["actor"], json!("run\\udcfftime"));
+    let inbox_state: Value = serde_json::from_slice(&fs::read(&inbox_ready).unwrap()).unwrap();
+    assert_eq!(inbox_state["actor"], json!("run\\udcfftime"));
+
+    let refused = Command::new("python3")
+        .arg("-B")
+        .arg(script("olp-board-sentinel.py"))
+        .arg("--board")
+        .arg(&sb.board)
+        .args([
+            "--token",
+            "x",
+            "--for",
+            "outer",
+            "--timeout",
+            "1",
+            "--since-head",
+        ])
+        .arg(OsStr::from_bytes(b"no\xffsuch"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "stdout={stdout} stderr={stderr}"
+    );
+    assert!(!stderr.contains("Traceback"), "stderr={stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout={stdout}");
+    let error: Value = serde_json::from_str(lines[0].strip_prefix("ERROR: ").unwrap()).unwrap();
+    assert!(
+        error["error"].as_str().unwrap().contains("no\\udcffsuch"),
+        "{error}"
     );
 }
