@@ -19,12 +19,12 @@ estimate: 3d
 - 读者以共享锁复制字节后在锁外回放；已配对、已消费区间用有序区间索引查询，回放近似线性。
 - item 只有一次 receive、一次终态 ack、一次 review；return 或 blocked 恢复另开 item，wontdo 不得 return；作者可 withdraw 未 receive 的 item，可 resolve 已 escalate 的 review 并可指向另一个既有后续 item。
 - 状态固定分为 unreceived、received_pending、unreviewed_ack、escalated；withdraw 与 resolve 使条目离开集合；runtime inbox 按 actor 显式返回前两类并保持账本出现顺序，但始终不授权执行；`--since-head` 只把触发事件位于基线之后的 received_pending、unreviewed_ack、escalated 计入 messages，runtime 尚未 receive 的 item 始终计入；基线应取自调用方已处理或有意暂留全部 messages 的那次输出的 head。
-- opt-in 前历史不追溯；opt-in 后未配对规范 item（`unpaired_item`）、符合 v1 语法（前导空白、全角冒号）的 ACK（`unpaired_ack`）与引用/列表/标题/强调/行内/旧式疑似 ACK（`suspected_ack`）标 DRIFT 并阻止自动调度；已配对 source 与已闭合围栏示例不触发。判定规范行与疑似 ACK 前先去掉 NUL（legacy 扫描器用 bash `read`，看不到 NUL），NUL 拆开关键字的手写 ACK 同样阻断，state 与 harvest 对同一行结论一致。未闭合围栏以 opener 字节证据阻塞，只有同种且不短于 opener 的闭合行恢复写入。末尾无 LF 的半行（无论内容）以 `partial_tail` 暴露，未进围栏的半截事件行同时是 malformed_event。
-- 收口只追加：item/ack 的 recovery 精确消费一条未配对规范行或含 `ACK(outcome)` 的疑似 ACK，语义须匹配（同样不计 NUL）；void 精确隔离一条 malformed_event、未配对行、疑似 ACK 或 partial_tail；每段原文至多消费一次，证据分别进入 recovery_evidence 与 quarantine_evidence。actor 是逻辑名，任何 actor 都可写 void，由外环人工核对是约定而非强制。
+- opt-in 前历史不追溯；opt-in 后未配对规范 item（`unpaired_item`）、符合 v1 语法（前导空白、全角冒号）的 ACK（`unpaired_ack`）与引用/列表/标题/强调/行内/旧式疑似 ACK（`suspected_ack`）标 DRIFT 并阻止自动调度；已配对 source 与已闭合围栏示例不触发。判定规范行与疑似 ACK 前先去掉 NUL（与 bash 4 及以上的 `read` 一致），NUL 拆开关键字的手写 ACK 同样阻断派发；harvest 为某行出卡时 state 不会仍报该行干净（bash 3.2 的 `read` 在 NUL 处截断，这时 harvest 在 recovery 前可能不为该行出卡，state 仍阻断，偏保守）。未闭合围栏以 opener 字节证据阻塞，只有同种且不短于 opener 的闭合行恢复写入。末尾无 LF 的半行（无论内容）以 `partial_tail` 暴露，未进围栏的半截事件行同时是 malformed_event。
+- 收口只追加：item/ack 的 recovery 精确消费一条未配对规范行或含 `ACK(outcome)` 的疑似 ACK，语义须匹配（同样不计 NUL；规范 item 标题行在第一个 `. ` 处拆分编号与标题，写入端拒绝含 `. ` 的编号，所以工具写出的标题行总能以原编号和标题恢复）；void 精确隔离一条 malformed_event、未配对行、疑似 ACK 或 partial_tail；每段原文至多消费一次，证据分别进入 recovery_evidence 与 quarantine_evidence。actor 是逻辑名，任何 actor 都可写 void，由外环人工核对是约定而非强制。
 - sentinel 的固定输出前缀为 LEDGER-SIGNAL、BOARD-SIGNAL、DRIFT、ERROR、TIMEOUT；普通等待与尾部未完成行超时都输出 TIMEOUT JSON 行并退出 3。基线后的文字按字节匹配 token，含非 UTF-8 字节的行照常命中，展示时替换无法解码的字节。
-- harvest 先无锁检查板中是否有 `> OLP-EVENT ` 行，没有就直接走原 legacy 扫描器，不调用 Python、不取板锁；有此类行时在共享锁下回放，回放出有效事件才走结构化路径，否则仍走 legacy 扫描器；有此类行而事件工具或板锁缺失时明确失败，不静默走 legacy（`.lock` 是结构化采集的前提）；结构化路径经 `snapshot` 在共享锁下只读一次字节，回放、legacy 扫描与结构化扫描都用这份快照，快照之后的追加留给下一轮，同一 ACK 跨轮只有一个 identity；候选行按字节合并，旧 shell 写入的非 UTF-8 旧触发行照常出卡，legacy 候选行按行号换算出快照中的真实 offset 后再与回放区间比对（bash `read` 丢弃 NUL，它累加的 offset 不可靠），带 recovery 的 identity 与 legacy 扫描器一样不计 NUL，采集在任何失败路径上都以 `error:` 行退出并清理临时目录；取得 ack.item、item.number（`|` 转义）与围栏/隔离区间；给定的或解析后的板路径含 `|` 或换行时行协议无法承载，结构化采集只以一个物理行的 `error:` 退出（路径转义后显示；给定路径也要查，因为命令替换会吞掉结尾换行）；带 recovery 的 ACK 沿用被恢复原行的 legacy identity，使恢复前已落的卡不重复；保留 legacy ACK 与签名 override/R2，抑制围栏示例、已隔离行、任何正式事件的 source（事件自己的正文，不论引用了什么）及 ACK recovery 原文的重复卡；临时文件用 mktemp。
+- harvest 先无锁检查板中是否有 `> OLP-EVENT ` 行，没有就直接走原 legacy 扫描器，不调用 Python、不取板锁；有此类行时在共享锁下回放，回放出有效事件才走结构化路径，否则仍走 legacy 扫描器；有此类行而事件工具或板锁缺失时明确失败，不静默走 legacy（`.lock` 是结构化采集的前提）；结构化路径经 `snapshot` 在共享锁下只读一次字节，回放、legacy 扫描与结构化扫描都用这份快照，快照之后的追加留给下一轮，同一 ACK 跨轮只有一个 identity；候选行按字节合并，旧 shell 写入的非 UTF-8 旧触发行照常出卡，legacy 候选行按行号换算出快照中的真实 offset 后再与回放区间比对（bash `read` 遇到 NUL 时 4 及以上版本丢弃、3.2 截断，行数都不变，但累加的 offset 不可靠），带 recovery 的 ACK 沿用 legacy 扫描器同一轮为被恢复行给出的 identity（该行未出卡时才自行计算），结果与运行 harvest 的 bash 版本无关，采集在任何失败路径上都以 `error:` 行退出并清理临时目录；取得 ack.item、item.number（`|` 转义）与围栏/隔离区间；给定的或解析后的板路径含 `|` 或换行时行协议无法承载，结构化采集只以一个物理行的 `error:` 退出（路径转义后显示；给定路径也要查，因为命令替换会吞掉结尾换行）；带 recovery 的 ACK 沿用被恢复原行的 legacy identity，使恢复前已落的卡不重复；保留 legacy ACK 与签名 override/R2，抑制围栏示例、已隔离行、任何正式事件的 source（事件自己的正文，不论引用了什么）及 ACK recovery 原文的重复卡；临时文件用 mktemp。
 - 板路径若是符号链接则拒绝，避免 Python 工具锁 `<目标>.lock` 而旧 shell 锁 `<链接>.lock`；板有多个硬链接（`st_nlink` 大于 1）时同样拒绝，否则每个路径各锁自己的 `.lock`；链接数在解析路径时查一次，取得锁、打开板后对打开的板再查一次（锁由路径派生，挡不住与写入并发的 link/unlink，是非对抗文件系统的前提）；旧 shell 按数值判断链接数，不从文件名文本推断；旧 shell 先把相对板路径改写成 `./<名字>`，以 `-`、`!`、`(` 开头的名字不会被 `find`/`grep` 读成选项或表达式；旧 shell 在已 opt-in 的板上同样拒绝，且不在链接旁建锁。
-- 各 CLI 把嵌套过深的 JSON 引发的递归错误与其他输入错误一样，报成一个机器 JSON 并退出 2；两个写入口的命令行参数解析错误也是写前失败，同样只输出一个 `may_have_appended=false` 的机器 JSON。
+- inbox 与 sentinel 的机器输出（结果、信号行与 ready 文件）在命令行参数含非 UTF-8 字节时仍是合法 UTF-8 JSON（这类字节以转义显示），sentinel 命中后不会因输出失败退出。各 CLI 把嵌套过深的 JSON 引发的递归错误与其他输入错误一样，报成一个机器 JSON 并退出 2；两个写入口的命令行参数解析错误也是写前失败，同样只输出一个 `may_have_appended=false` 的机器 JSON。
 - 依赖外部命令的 init 场景在 PATH 前放 `octoscode`/`octos` 空桩，测试结果不取决于开发机或 CI 是否全局安装这两个命令。
 - init 默认保持 legacy；`OLP_BOARD_MODE=structured` 只为新文件生成 receive→执行→ack 模板、带 opt-in 标记且无裸 ACK 占位的新板和独立普通锁，并把锁加入 `.gitignore`；按账本事件顺序选择最早的 `unreceived` item。四个 Python 工具相邻安装且不覆盖，既有项目仅提示迁移，无 Python 时保留旧 shell 能力。
 - 所有场景绑定 `tests/olp_board_protocol.rs` 中直接调用生产 CLI 的 Rust 集成测试，不用单一 Python suite wrapper 代替逐场景证据。
@@ -326,9 +326,9 @@ estimate: 3d
   Level: integration
   Test Double: temporary boards only; the harvest script and event tool are not replaced
   Targets: olp-evo-harvest.sh candidate-merge offsets and the identity of recovered lines
-  假设 已 opt-in 的板上一条经旧 shell 追加、含 NUL 字节的手写 blocked ACK
+  假设 已 opt-in 的板上一条经旧 shell 追加、含 NUL 字节的手写 blocked ACK,本机上的每个 bash(PATH 上的与 /bin/bash,macOS 上后者是 3.2)各测一遍
   当 运行真实 harvest dry-run,再以正式 ACK recovery 该行、追加一行签名 R2 记档后再运行一次
-  那么 两次都只有该 ACK 的一张卡且 identity 相同(与旧扫描器一样不计 NUL);第二次另有 R2 记档一张卡,其 envelope offset 等于该行在板上的真实字节 offset
+  那么 两次都只有该 ACK 的一张卡且 identity 相同(recovery 沿用旧扫描器给该行的 identity);第二次另有 R2 记档一张卡,其 envelope offset 等于该行在板上的真实字节 offset
 
 场景: 旧 shell 在已 opt-in 板上不写半行
   测试: olp_board_legacy_shell_keeps_lines_whole_on_opted_in_boards
@@ -339,15 +339,33 @@ estimate: 3d
   当 旧 shell 追加不以 LF 结尾的正文、在以半行结尾的板上追加,并分两次追加 `> OLP-` 与 `EVENT {...}`
   那么 legacy 板照旧写入;已 opt-in 的板对前两种退出 2 且字节不变,分两次追加拼不出事件行
 
-场景: NUL 拆开关键字的手写 ACK 在 state 与 harvest 中结论一致(critical)
+场景: NUL 拆开关键字的手写 ACK 阻止派发且只出一张卡(critical)
   标签: critical
-  测试: olp_board_replay_and_harvest_agree_on_nul_split_ack_lines
+  测试: olp_board_nul_split_ack_blocks_dispatch_and_cards_once
   Level: integration
-  Test Double: temporary boards only; the harvest script and event tool are not replaced
-  Targets: olp-board-event.py normative classification and recovery matching, olp-evo-harvest.sh legacy scanner
+  Test Double: temporary boards only, run under every bash on the host (on macOS the system /bin/bash is 3.2); the harvest script and event tool are not replaced
+  Targets: olp-board-event.py normative classification and recovery matching, olp-evo-harvest.sh legacy scanner and recovered identity
   假设 已 opt-in 的板上一条经旧 shell 追加的 `A<NUL>CK(blocked): ...` 行
   当 运行 state 与真实 harvest dry-run,再以正式 ACK recovery 该行后各运行一次
-  那么 state 把它报为 unpaired_ack 并阻止派发,harvest 恰出一张卡;recovery 被接受,之后 DRIFT 清空,harvest 仍只有同一 identity 的一张卡
+  那么 state 把它报为 unpaired_ack 并阻止派发;recovery 前 harvest 至多一张卡(bash 4 及以上一张,3.2 为零);recovery 后 DRIFT 清空且恰有一张卡,前后若都有卡则 identity 相同
+
+场景: 标题含 `. ` 的 item 能以原编号和标题 recovery
+  测试: olp_board_item_numbers_stay_parseable_for_titles_with_dot_space
+  Level: integration
+  Test Double: temporary boards; a raw append stands in for a hand-written heading
+  Targets: olp-board-event.py ITEM_LINE, recovery matching and the item writer
+  假设 opt-in 后一行手写的 `### 9. Fix. the thing with dots`
+  当 以编号 9 与标题 `Fix. the thing with dots` recovery,并尝试写入编号为 `9. Fix` 的 item
+  那么 recovery 被接受且 DRIFT 清空;编号含 `. ` 的写入退出 2 并指明原因,板字节不变
+
+场景: 参数含非 UTF-8 字节时各 CLI 的机器输出仍可解析
+  测试: olp_board_cli_output_survives_non_utf8_arguments
+  Level: integration
+  Test Double: temporary boards and non-UTF-8 command-line arguments only
+  Targets: olp-board-sentinel.py emit and ready file, olp-board-inbox.py output, the shared printable helper
+  假设 一块结构化板
+  当 sentinel 以含非 UTF-8 字节的 token 与 actor 命中旧 shell 追加的一行,inbox 以含非 UTF-8 字节的 actor 查询,sentinel 以含非 UTF-8 字节的 --since-head 启动
+  那么 前两者退出 0,输出与 ready 文件都是可解析的 JSON(该字节以转义显示),后者以一条可解析的 ERROR 行退出 2,都没有 traceback
 
 场景: 有多个硬链接的板被拒绝
   测试: olp_board_tools_refuse_hard_linked_boards
