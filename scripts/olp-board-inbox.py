@@ -127,7 +127,10 @@ def main(argv=None):
     # RecursionError: deeply nested JSON input is an input error like any other.
     except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError,
             KeyboardInterrupt) as error:
-        print(json.dumps({"status": "error", "matched": False, "error": str(error)},
+        # Escaped in place rather than through printable(): the error may be a
+        # failure to load the board tools that printable() itself needs.
+        message = str(error).encode("utf-8", "backslashreplace").decode("utf-8")
+        print(json.dumps({"status": "error", "matched": False, "error": message},
                          ensure_ascii=False), file=sys.stderr)
         return 2
 

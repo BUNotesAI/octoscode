@@ -4597,6 +4597,24 @@ fn olp_board_cli_output_survives_non_utf8_arguments() {
     let inbox_state: Value = serde_json::from_slice(&fs::read(&inbox_ready).unwrap()).unwrap();
     assert_eq!(inbox_state["actor"], json!("run\\udcfftime"));
 
+    let unknown_head = Command::new("python3")
+        .arg("-B")
+        .arg(script("olp-board-inbox.py"))
+        .arg("--board")
+        .arg(&sb.board)
+        .args(["--for", "runtime", "--since-head"])
+        .arg(OsStr::from_bytes(b"no\xffsuch"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&unknown_head.stderr);
+    assert_eq!(unknown_head.status.code(), Some(2), "stderr={stderr}");
+    assert!(!stderr.contains("Traceback"), "stderr={stderr}");
+    let error: Value = serde_json::from_slice(&unknown_head.stderr).unwrap();
+    assert!(
+        error["error"].as_str().unwrap().contains("no\\udcffsuch"),
+        "{error}"
+    );
+
     let refused = Command::new("python3")
         .arg("-B")
         .arg(script("olp-board-sentinel.py"))

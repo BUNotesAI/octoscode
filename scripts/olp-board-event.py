@@ -136,15 +136,21 @@ def content(line):
 
 
 def visible(line):
-    """The line as the legacy harvest scanner sees it: bash `read` drops NUL bytes."""
+    """The line without NUL bytes: the conservative view state and recovery judge.
+
+    It matches bash 4+ `read`, which drops NUL. bash 3.2 cuts the line at the
+    NUL instead, so its legacy scanner may see only the prefix; the harvest
+    merge reconciles identities by line number either way.
+    """
     return line.replace(b"\0", b"")
 
 
 def normative_kind(line):
     if line.startswith(PREFIX):
         return None
-    # Judge the line as the legacy scanner reads it, so a NUL splitting a
-    # keyword cannot hide an ACK that harvest still cards.
+    # Judge the line without NUL bytes, so a NUL splitting a keyword cannot
+    # hide an ACK: state blocks dispatch whatever the legacy scanner's bash
+    # makes of the line (bash 3.2 may not card it before its recovery).
     line = visible(line)
     if ITEM_LINE.fullmatch(line):
         return "item"
