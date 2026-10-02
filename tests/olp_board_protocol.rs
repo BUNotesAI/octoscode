@@ -773,6 +773,85 @@ fn olp_board_inbox_preserves_ledger_order_for_arbitrary_numbers() {
     assert_eq!(numbers, vec!["4N", "2", "A"]);
 }
 
+/// Test Path Statement: Real event, state and outer inbox CLIs with only
+/// temporary files isolated. Concurrent completion order must determine ACK
+/// and escalation queues, including their combined --since-head projection.
+#[test]
+fn olp_board_outer_queues_follow_ack_and_review_event_order() {
+    let sb = Sandbox::new("outer-event-order");
+    let items: Vec<Value> = ["A", "B", "C", "D"]
+        .into_iter()
+        .map(|number| sb.item(number, "Concurrent work", "outer", "runtime"))
+        .collect();
+    for item in &items {
+        success_json(sb.receive("runtime", item["event"].as_str().unwrap()));
+    }
+    let acks: Vec<Value> = [1, 0, 2]
+        .into_iter()
+        .map(|index| {
+            success_json(sb.ack(
+                "runtime",
+                items[index]["event"].as_str().unwrap(),
+                "blocked",
+            ))
+        })
+        .collect();
+    let ids = |entries: &Value| -> Vec<String> {
+        entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let event_id = |receipt: &Value| receipt["event"].as_str().unwrap().to_owned();
+    assert_eq!(
+        ids(&sb.state()["unreviewed_ack"]),
+        acks.iter().map(event_id).collect::<Vec<_>>()
+    );
+
+    let reviews: Vec<Value> = [2, 0]
+        .into_iter()
+        .map(|index| {
+            success_json(sb.review("outer", acks[index]["event"].as_str().unwrap(), "escalate"))
+        })
+        .collect();
+    let last_ack = success_json(sb.ack("runtime", items[3]["event"].as_str().unwrap(), "blocked"));
+    let state = sb.state();
+    assert_eq!(
+        ids(&state["escalated"]),
+        reviews.iter().map(event_id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ids(&state["unreviewed_ack"]),
+        vec![event_id(&acks[1]), event_id(&last_ack)]
+    );
+    for since in [None, Some(event_id(&reviews[0]))] {
+        let mut command = Command::new("python3");
+        command
+            .arg("-B")
+            .arg(script("olp-board-inbox.py"))
+            .arg("--board")
+            .arg(&sb.board)
+            .args(["--for", "outer", "--actor", "outer"]);
+        if let Some(head) = &since {
+            command.args(["--since-head", head]);
+        }
+        let inbox = success_json(command.output().unwrap());
+        let expected = if since.is_some() {
+            vec![event_id(&reviews[1]), event_id(&last_ack)]
+        } else {
+            vec![
+                event_id(&acks[1]),
+                event_id(&reviews[0]),
+                event_id(&reviews[1]),
+                event_id(&last_ack),
+            ]
+        };
+        assert_eq!(ids(&inbox["messages"]), expected);
+    }
+}
+
 /// Test Path Statement: Real item and generic record/ACK CLI paths recover
 /// exact post-opt-in text while preserving it as auditable byte evidence.
 #[test]

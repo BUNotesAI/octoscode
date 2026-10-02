@@ -596,6 +596,10 @@ class State:
                 unreviewed_ack.append(item["ack"])
             elif item["review"]["decision"] == "escalate" and item["resolve"] is None:
                 escalated.append(item["review"])
+        # Items arrive before their ACKs/reviews, which can arrive in any order
+        # when recipients work concurrently. Each queue follows its own events.
+        unreviewed_ack.sort(key=lambda event: self.order[event["id"]])
+        escalated.sort(key=lambda event: self.order[event["id"]])
         mode = "mixed" if self.drift else ("structured" if self.events else "legacy")
         return {
             "schema": SCHEMA,

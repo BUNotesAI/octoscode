@@ -234,6 +234,15 @@ estimate: 3d
   当 runtime inbox 查询 unreceived
   那么 返回顺序仍为 4N、2、A 且不按编号排序
 
+场景: 乱序完成时待审与升级按自身事件顺序返回
+  测试: olp_board_outer_queues_follow_ack_and_review_event_order
+  Test Path Statement: Real-path regression through event, state and outer inbox CLIs.
+  Test Double: Only temporary board files; no parser or ledger substitutes.
+  Targets: olp-board-event.py projection and olp-board-inbox.py outer messages
+  假设 A、B、C、D 依次派单,ACK 按 B、A、C 到达,升级按 C、B 到达,最后 D ACK
+  当 查询 state、outer inbox 与带 since-head 的 outer inbox
+  那么 待审 ACK 和升级各按其自身事件顺序排列,合并 messages 也按事件顺序排列
+
 场景: sentinel 启动后动态账本事件使用冻结前缀
   测试: olp_board_sentinel_reports_dynamic_ledger_signals
   Level: integration

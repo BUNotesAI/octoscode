@@ -139,6 +139,11 @@ Scenario: 任意编号保持账本投递顺序
   When runtime inbox 查询 unreceived
   Then 返回顺序仍为 4N、2、A
 
+Scenario: 乱序完成保持待审和升级事件顺序
+  Given 按 A、B、C、D 派单，完成与升级事件以不同顺序到达
+  When 查询 state 和 outer inbox（包括 since-head 过滤）
+  Then unreviewed_ack 按 ACK 事件顺序，escalated 按 review 事件顺序，outer messages 按两类事件的共同账本顺序返回
+
 Scenario: legacy 板采集逐字节不变
   Given 带旧 shell 锁文件的 legacy 板、被他人持有的板锁、会记录调用的 python3 替身和一行引用事件文字
   When 运行真实进化采集脚本

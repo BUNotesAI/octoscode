@@ -75,6 +75,7 @@ def query(board, role, actor, since_head=None, lock_timeout=10.0):
             messages = [entry for entry in messages
                         if state.items[(entry.get("item") or state.acks[entry["ack"]]["item"])]["event"]["actor"] == identity]
         messages = [entry for entry in messages if fresh(entry)]
+        messages.sort(key=lambda entry: state.order[entry["id"]])
         category = "outer_action"
     return {"schema": event.SCHEMA, "mode": projection["mode"], "for": role,
             "actor": identity, "head": projection["head"], "since_head": since_head,
